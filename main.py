@@ -173,6 +173,10 @@ def fetch_boards_and_subboards(access_token):
     if res and res.status_code == 200:
         boards = res.json().get("items", [])
         for b in boards:
+            # Skip Pinterest default system board "Quick saves"
+            if b["name"].strip().lower() == "quick saves":
+                continue
+
             all_targets.append({
                 "id": b["id"],
                 "name": b["name"],
@@ -227,7 +231,7 @@ def main():
     # 3. Fetch All Boards & Subboards
     targets = fetch_boards_and_subboards(access_token)
     if not targets:
-        log("⚠️ No boards found.", level="WARNING")
+        log("⚠️ No valid public boards found.", level="WARNING")
         return
 
     # Round-Robin State Tracking
@@ -327,3 +331,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+                                        
