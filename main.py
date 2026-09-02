@@ -56,7 +56,7 @@ def safe_api_request(method, url, **kwargs):
 # ==========================================
 def check_pause_status():
     """ Handles /pause and /resume commands via Telegram Updates """
-    state = load_json(STATE_FILE, default={"is_paused": False})
+    state = load_json(STATE_FILE, default={"last_board_index": -1, "is_paused": False})
     
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     res = safe_api_request("GET", url)
@@ -76,31 +76,25 @@ def check_pause_status():
                 
     return state.get("is_paused", False)
 
-def send_telegram_media(media_url, is_video=False, is_spoiler=False):
-    """ Sends Image/Video with Inline Buttons, Content Protection, and optional Blur """
+def send_telegram_media(media_url, board_name, is_video=False, is_spoiler=False):
+    """ Sends Image/Video with Board Name Caption (Buttons Removed) """
     endpoint = "sendVideo" if is_video else "sendPhoto"
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{endpoint}"
     
-    # Inline Reactions Keyboard
-    reply_markup = {
-        "inline_keyboard": [[
-            {"text": "❤️", "callback_data": "like"},
-            {"text": "🔥", "callback_data": "fire"},
-            {"text": "👍", "callback_data": "thumbs_up"}
-        ]]
-    }
+    caption_text = f"📁 <b>{board_name}</b>"
 
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         ("video" if is_video else "photo"): media_url,
+        "caption": caption_text,
+        "parse_mode": "HTML",
         "protect_content": True,  # Disables saving & forwarding
-        "has_spoiler": is_spoiler, # Blur effect if True
-        "reply_markup": json.dumps(reply_markup)
+        "has_spoiler": is_spoiler  # Blur effect if True
     }
 
     res = safe_api_request("POST", url, data=payload)
     if res and res.status_code == 200:
-        log("✅ Posted to Telegram successfully (No text added).")
+        log(f"✅ Posted to Telegram successfully from '{board_name}'.")
         return True
     else:
         err_msg = res.text if res else "No Response"
@@ -121,7 +115,7 @@ def get_history_filepath(board_id):
     return os.path.join(HISTORY_DIR, f"posted_{safe_id}.txt")
 
 def load_posted_ids(board_id):
-    """ Fast Hash Set lookup O(1) for high performance even with millions of IDs """
+    """ Fast Hash Set lookup O(1) """
     filepath = get_history_filepath(board_id)
     if not os.path.exists(filepath):
         return set()
@@ -223,25 +217,28 @@ def main():
         log("⏸️ Execution skipped. Bot is currently PAUSED.", level="WARNING")
         return
 
-    # 2. Get Fresh Access Token
+    # 2. Get Access Token
     access_token = get_access_token()
     if not access_token:
         return
 
-    # 3. Fetch All Boards & Subboards
+    # 3. Fetch Boards
     targets = fetch_boards_and_subboards(access_token)
     if not targets:
         log("⚠️ No valid public boards found.", level="WARNING")
         return
 
-    # Round-Robin State Tracking
-    state = load_json(STATE_FILE, default={"last_board_index": -1})
-    start_index = (state.get("last_board_index", -1) + 1) % len(targets)
+    # Round-Robin State Tracking (Strict Index Increment)
+    state = load_json(STATE_FILE, default={"last_board_index": -1, "is_paused": False})
+    last_idx = state.get("last_board_index", -1)
+    
+    # Calculate Next Board Index sequentially
+    start_index = (last_idx + 1) % len(targets)
 
     posted = False
     report_data = load_json(DAILY_REPORT_FILE, default={"images": 0, "videos": 0, "boards": {}})
 
-    # Sequential iteration through boards starting from last left off
+    # Iterate strictly starting from the NEXT board in alphabetical order
     for idx_offset in range(len(targets)):
         current_idx = (start_index + idx_offset) % len(targets)
         target = targets[current_idx]
@@ -257,7 +254,7 @@ def main():
             log(f"⏩ Board '{board_name}' has no pins or finished. Skipping.")
             continue
 
-        # Shuffle pins randomly for random selection
+        # Shuffle pins randomly for selecting random image in that board
         random.shuffle(pins)
 
         # Select first unposted item
@@ -282,17 +279,18 @@ def main():
             if not media_url:
                 continue
 
-            # Check if Blur effect is needed ONLY for "special" board
+            # Check Blur (Spoiler) for "special" board
             is_spoiler = "special" in board_name.lower()
             if is_spoiler:
                 log(f"🔞 Board name contains 'special'. Enabling Blur (Spoiler).")
 
             log(f"📤 Posting media {pin_id} from '{board_name}'...")
-            success = send_telegram_media(media_url, is_video=is_video, is_spoiler=is_spoiler)
+            success = send_telegram_media(media_url, board_name=board_name, is_video=is_video, is_spoiler=is_spoiler)
 
             if success:
                 record_posted_id(board_id, pin_id)
                 
+                # Update Next Index strictly in state
                 state["last_board_index"] = current_idx
                 save_json(STATE_FILE, state)
 
@@ -310,7 +308,7 @@ def main():
         if posted:
             break
 
-    # 4. Daily Digest Report (Triggers at 8 PM / 20:00)
+    # 4. Daily Report Sending Logic (At 20:00 / 8 PM)
     now = datetime.now()
     if now.hour == 20 and (report_data.get("images", 0) + report_data.get("videos", 0) > 0):
         summary_text = (
@@ -326,9 +324,7 @@ def main():
         send_telegram_message(ADMIN_CHAT_ID, summary_text)
         log("📈 Daily Analytics Report sent to Admin!")
         
-        # Reset report tracking for next day
         save_json(DAILY_REPORT_FILE, {"images": 0, "videos": 0, "boards": {}})
 
 if __name__ == "__main__":
     main()
-                                        
