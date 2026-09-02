@@ -77,19 +77,23 @@ def check_pause_status():
     return state.get("is_paused", False)
 
 def send_telegram_media(media_url, board_name, is_video=False, is_spoiler=False):
-    """ Sends Image/Video with Board Name Caption (Buttons Removed) """
+    """ Sends Image/Video with Board Name as Inline Button (Visible in Channel, hidden in linked Group) """
     endpoint = "sendVideo" if is_video else "sendPhoto"
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{endpoint}"
     
-    caption_text = f"📁 <b>{board_name}</b>"
+    # Board Name as Inline Button (This hides automatically in linked discussion groups)
+    reply_markup = {
+        "inline_keyboard": [[
+            {"text": f"📁 Board: {board_name}", "callback_data": "board_info"}
+        ]]
+    }
 
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         ("video" if is_video else "photo"): media_url,
-        "caption": caption_text,
-        "parse_mode": "HTML",
         "protect_content": True,  # Disables saving & forwarding
-        "has_spoiler": is_spoiler  # Blur effect if True
+        "has_spoiler": is_spoiler, # Blur effect if True
+        "reply_markup": json.dumps(reply_markup)
     }
 
     res = safe_api_request("POST", url, data=payload)
@@ -228,17 +232,15 @@ def main():
         log("⚠️ No valid public boards found.", level="WARNING")
         return
 
-    # Round-Robin State Tracking (Strict Index Increment)
+    # Round-Robin State Tracking
     state = load_json(STATE_FILE, default={"last_board_index": -1, "is_paused": False})
     last_idx = state.get("last_board_index", -1)
     
-    # Calculate Next Board Index sequentially
     start_index = (last_idx + 1) % len(targets)
 
     posted = False
     report_data = load_json(DAILY_REPORT_FILE, default={"images": 0, "videos": 0, "boards": {}})
 
-    # Iterate strictly starting from the NEXT board in alphabetical order
     for idx_offset in range(len(targets)):
         current_idx = (start_index + idx_offset) % len(targets)
         target = targets[current_idx]
@@ -254,14 +256,12 @@ def main():
             log(f"⏩ Board '{board_name}' has no pins or finished. Skipping.")
             continue
 
-        # Shuffle pins randomly for selecting random image in that board
         random.shuffle(pins)
 
-        # Select first unposted item
         for pin in pins:
             pin_id = pin.get("id")
             if pin_id in posted_ids:
-                continue # Fast O(1) check
+                continue
 
             media = pin.get("media", {})
             media_type = media.get("media_type", "image")
@@ -279,7 +279,6 @@ def main():
             if not media_url:
                 continue
 
-            # Check Blur (Spoiler) for "special" board
             is_spoiler = "special" in board_name.lower()
             if is_spoiler:
                 log(f"🔞 Board name contains 'special'. Enabling Blur (Spoiler).")
@@ -290,7 +289,6 @@ def main():
             if success:
                 record_posted_id(board_id, pin_id)
                 
-                # Update Next Index strictly in state
                 state["last_board_index"] = current_idx
                 save_json(STATE_FILE, state)
 
@@ -308,7 +306,7 @@ def main():
         if posted:
             break
 
-    # 4. Daily Report Sending Logic (At 20:00 / 8 PM)
+    # 4. Daily Report
     now = datetime.now()
     if now.hour == 20 and (report_data.get("images", 0) + report_data.get("videos", 0) > 0):
         summary_text = (
@@ -328,3 +326,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+                
