@@ -4,7 +4,7 @@ import random
 import time
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 # ==========================================
 # 1. CONFIGURATION & ENVIRONMENT VARIABLES
@@ -77,11 +77,10 @@ def check_pause_status():
     return state.get("is_paused", False)
 
 def send_telegram_media(media_url, board_name, is_video=False, is_spoiler=False):
-    """ Sends Image/Video with Board Name as Inline Button (Visible in Channel, hidden in linked Group) """
+    """ Sends Image/Video with Board Name as Inline Button """
     endpoint = "sendVideo" if is_video else "sendPhoto"
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{endpoint}"
     
-    # Board Name as Inline Button (This hides automatically in linked discussion groups)
     reply_markup = {
         "inline_keyboard": [[
             {"text": f"📁 Board: {board_name}", "callback_data": "board_info"}
@@ -91,8 +90,8 @@ def send_telegram_media(media_url, board_name, is_video=False, is_spoiler=False)
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         ("video" if is_video else "photo"): media_url,
-        "protect_content": True,  # Disables saving & forwarding
-        "has_spoiler": is_spoiler, # Blur effect if True
+        "protect_content": True,
+        "has_spoiler": is_spoiler,
         "reply_markup": json.dumps(reply_markup)
     }
 
@@ -119,7 +118,6 @@ def get_history_filepath(board_id):
     return os.path.join(HISTORY_DIR, f"posted_{safe_id}.txt")
 
 def load_posted_ids(board_id):
-    """ Fast Hash Set lookup O(1) """
     filepath = get_history_filepath(board_id)
     if not os.path.exists(filepath):
         return set()
@@ -127,7 +125,6 @@ def load_posted_ids(board_id):
         return set(line.strip() for line in f if line.strip())
 
 def record_posted_id(board_id, item_id):
-    """ Appends posted ID to dedicated board text file """
     filepath = get_history_filepath(board_id)
     with open(filepath, "a", encoding="utf-8") as f:
         f.write(f"{item_id}\n")
@@ -162,7 +159,6 @@ def get_access_token():
     return None
 
 def fetch_boards_and_subboards(access_token):
-    """ Auto-detects main boards & sub-boards, sorted alphabetically """
     url = "https://api.pinterest.com/v5/boards"
     headers = {"Authorization": f"Bearer {access_token}"}
     res = safe_api_request("GET", url, headers=headers)
@@ -171,7 +167,6 @@ def fetch_boards_and_subboards(access_token):
     if res and res.status_code == 200:
         boards = res.json().get("items", [])
         for b in boards:
-            # Skip Pinterest default system board "Quick saves"
             if b["name"].strip().lower() == "quick saves":
                 continue
 
@@ -180,7 +175,6 @@ def fetch_boards_and_subboards(access_token):
                 "name": b["name"],
                 "is_subboard": False
             })
-            # Check for Sub-boards
             sub_url = f"https://api.pinterest.com/v5/boards/{b['id']}/sections"
             sub_res = safe_api_request("GET", sub_url, headers=headers)
             if sub_res and sub_res.status_code == 200:
@@ -193,7 +187,6 @@ def fetch_boards_and_subboards(access_token):
                         "parent_id": b["id"]
                     })
                     
-    # Alphabetical Order (Ascending)
     all_targets.sort(key=lambda x: x["name"].lower())
     log(f"📋 Total Boards/Sub-boards Detected & Sorted: {len(all_targets)}")
     return all_targets
@@ -239,7 +232,7 @@ def main():
     start_index = (last_idx + 1) % len(targets)
 
     posted = False
-    report_data = load_json(DAILY_REPORT_FILE, default={"images": 0, "videos": 0, "boards": {}})
+    report_data = load_json(DAILY_REPORT_FILE, default={"images": 0, "videos": 0, "boards": {}, "last_report_date": ""})
 
     for idx_offset in range(len(targets)):
         current_idx = (start_index + idx_offset) % len(targets)
@@ -293,11 +286,14 @@ def main():
                 save_json(STATE_FILE, state)
 
                 if is_video:
-                    report_data["videos"] += 1
+                    report_data["videos"] = report_data.get("videos", 0) + 1
                 else:
-                    report_data["images"] += 1
+                    report_data["images"] = report_data.get("images", 0) + 1
 
-                report_data["boards"][board_name] = report_data["boards"].get(board_name, 0) + 1
+                boards_dict = report_data.get("boards", {})
+                boards_dict[board_name] = boards_dict.get(board_name, 0) + 1
+                report_data["boards"] = boards_dict
+                
                 save_json(DAILY_REPORT_FILE, report_data)
 
                 posted = True
@@ -306,24 +302,43 @@ def main():
         if posted:
             break
 
-    # 4. Daily Report
-    now = datetime.now()
-    if now.hour == 20 and (report_data.get("images", 0) + report_data.get("videos", 0) > 0):
-        summary_text = (
-            f"📊 <b>Daily Pinterest Analytics Summary Report</b>\n"
-            f"📅 Date: {now.strftime('%Y-%m-%d')}\n\n"
-            f"🖼 Total Images Posted: <b>{report_data.get('images', 0)}</b>\n"
-            f"🎥 Total Videos Posted: <b>{report_data.get('videos', 0)}</b>\n\n"
-            f"<b>Board Details:</b>\n"
-        )
-        for b_name, count in report_data.get("boards", {}).items():
-            summary_text += f"• {b_name}: {count} post(s)\n"
+    # ==========================================
+    # 4. DYNAMIC DAILY REPORT (8:00 PM IST Trigger)
+    # ==========================================
+    # Convert UTC time directly to IST (UTC + 5:30)
+    utc_now = datetime.now(timezone.utc)
+    ist_now = utc_now + timedelta(hours=5, minutes=30)
+    
+    today_str = ist_now.strftime("%Y-%m-%d")
+    last_report_date = report_data.get("last_report_date", "")
 
-        send_telegram_message(ADMIN_CHAT_ID, summary_text)
-        log("📈 Daily Analytics Report sent to Admin!")
+    # IST టైమ్ ప్రకారం రాత్రి 8 గంటలు (20:00) దాటితే మరియు ఈరోజుకి ఇంకా రిపోర్ట్ పంపకపోతే...
+    if ist_now.hour >= 20 and last_report_date != today_str:
+        total_posts = report_data.get("images", 0) + report_data.get("videos", 0)
         
-        save_json(DAILY_REPORT_FILE, {"images": 0, "videos": 0, "boards": {}})
+        if total_posts > 0:
+            summary_text = (
+                f"📊 <b>Daily Pinterest Analytics Summary Report</b>\n"
+                f"📅 Date: {today_str}\n\n"
+                f"🖼 Total Images Posted: <b>{report_data.get('images', 0)}</b>\n"
+                f"🎥 Total Videos Posted: <b>{report_data.get('videos', 0)}</b>\n\n"
+                f"<b>Board Details:</b>\n"
+            )
+            for b_name, count in report_data.get("boards", {}).items():
+                summary_text += f"• {b_name}: {count} post(s)\n"
+
+            send_telegram_message(ADMIN_CHAT_ID, summary_text)
+            log("📈 Daily Analytics Report sent to Admin!")
+
+        # ఈరోజు రిపోర్ట్ పంపినట్లు మార్క్ చేసి, కౌంటర్‌ని ఆటోమేటిక్‌గా రీసెట్ చేయడం
+        new_report_data = {
+            "images": 0, 
+            "videos": 0, 
+            "boards": {}, 
+            "last_report_date": today_str
+        }
+        save_json(DAILY_REPORT_FILE, new_report_data)
 
 if __name__ == "__main__":
     main()
-                
+    
