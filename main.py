@@ -7,14 +7,14 @@ import requests
 from datetime import datetime
 import pytz
 
-# Setup Advanced Logging
+# Detailed Logging Mechanism (Requirement 7)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[logging.StreamHandler()]
 )
 
-# Secrets Environment Fetch
+# Fetching Secrets & Configuration (Requirement 1)
 PINTEREST_APP_ID = os.getenv("PINTEREST_APP_ID")
 PINTEREST_APP_SECRET = os.getenv("PINTEREST_APP_SECRET")
 PINTEREST_REFRESH_TOKEN = os.getenv("PINTEREST_REFRESH_TOKEN")
@@ -30,8 +30,6 @@ BOARD_MAPPING_JSON = os.getenv("BOARD_MAPPING_JSON", "{}")
 STATE_FILE = "state.json"
 CONTROL_FILE = "bot_control.json"
 STATS_FILE = "daily_stats.json"
-
-HOT_KEYWORDS = ["hot", "special", "nsfw", "adult", "sexy", "blur"]
 
 # ----------------- Helper Functions ----------------- #
 
@@ -53,6 +51,7 @@ def save_json(filepath, data):
     except Exception as e:
         logging.error(f"Error saving {filepath}: {e}")
 
+# Fast Search via Set Data Structure (Requirement 3, 6, 11, 15)
 def load_posted_ids(board_id):
     file_path = f"posted_{board_id}.txt"
     if os.path.exists(file_path):
@@ -65,6 +64,7 @@ def append_posted_id(board_id, item_id):
     with open(file_path, "a") as f:
         f.write(f"{item_id}\n")
 
+# Smart Backoff Anti-Block System (Rate Limiting)
 def api_request_with_backoff(url, method="GET", headers=None, data=None, json_payload=None, auth=None):
     max_retries = 5
     delay = 1
@@ -75,7 +75,7 @@ def api_request_with_backoff(url, method="GET", headers=None, data=None, json_pa
             else:
                 res = requests.post(url, headers=headers, data=data, json=json_payload, auth=auth, timeout=15)
 
-            if res.status_code == 429:
+            if res and res.status_code == 429:
                 logging.warning(f"Rate limited (429). Retrying in {delay}s...")
                 time.sleep(delay)
                 delay *= 2
@@ -87,6 +87,7 @@ def api_request_with_backoff(url, method="GET", headers=None, data=None, json_pa
             delay *= 2
     return None
 
+# Telegram Pause/Resume Command Handler (Requirement 13)
 def check_telegram_commands():
     if not ADMIN_BOT_TOKEN:
         return True
@@ -113,7 +114,7 @@ def check_telegram_commands():
     
     return not control.get("is_paused", False)
 
-# ----------------- Pinterest API ----------------- #
+# ----------------- Pinterest API Section ----------------- #
 
 def get_pinterest_access_token():
     url = "https://api.pinterest.com/v5/oauth/token"
@@ -132,6 +133,7 @@ def get_pinterest_access_token():
     return None
 
 def get_board_sections(access_token, board_id):
+    """Sub-boards/Sections Support (Requirement 16)"""
     url = f"https://api.pinterest.com/v5/boards/{board_id}/sections"
     headers = {"Authorization": f"Bearer {access_token}"}
     res = api_request_with_backoff(url, headers=headers)
@@ -151,12 +153,13 @@ def get_pins_from_target(access_token, target_id, is_section=False):
         return res.json().get("items", [])
     return []
 
-# ----------------- Telegram Posting ----------------- #
+# ----------------- Telegram Dispatcher ----------------- #
 
-def post_media_to_telegram(media_url, is_video, is_hot_board, board_name):
+def post_media_to_telegram(media_url, is_video, is_special_board, board_name):
     """
-    - Reaction buttons removed.
-    - Added Board Name button so it shows ONLY in the Channel (auto-removed in Discussion Group).
+    - Spoiler/Blur: Applied ONLY if board is "Special" (Requirement 14)
+    - Protection: protect_content=True
+    - Inline Button: Visible only in Channel, hidden in linked group
     """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/" + ("sendVideo" if is_video else "sendPhoto")
     
@@ -178,7 +181,8 @@ def post_media_to_telegram(media_url, is_video, is_hot_board, board_name):
         "reply_markup": json.dumps(reply_markup)
     }
     
-    if is_hot_board:
+    # Requirement 14: Only "Special" board images get blurred
+    if is_special_board:
         payload["has_spoiler"] = True
 
     res = api_request_with_backoff(url, method="POST", json_payload=payload)
@@ -195,28 +199,30 @@ def send_admin_report(report_text):
     payload = {"chat_id": ADMIN_CHAT_ID, "text": report_text, "parse_mode": "Markdown"}
     api_request_with_backoff(url, method="POST", json_payload=payload)
 
-# ----------------- Main Engine ----------------- #
+# ----------------- Engine Execution ----------------- #
 
 def main():
-    logging.info("Starting Pinterest Engine Process...")
+    logging.info("Initializing Pinterest Engine Process...")
 
     if not check_telegram_commands():
-        logging.info("Bot is currently PAUSED. Exiting run.")
+        logging.info("Bot is currently PAUSED via Telegram command. Exiting.")
         return
 
     try:
         board_mapping = json.loads(BOARD_MAPPING_JSON)
-    except Exception:
+    except Exception as e:
+        logging.error(f"Failed to parse BOARD_MAPPING_JSON: {e}")
         board_mapping = {}
 
     access_token = get_pinterest_access_token()
     if not access_token:
         return
 
+    # Requirement 2: Ascending Order sorting by Board Names
     sorted_board_ids = sorted(board_mapping.keys(), key=lambda b_id: board_mapping[b_id].lower())
     
     if not sorted_board_ids:
-        logging.warning("No board mappings provided in environment variables.")
+        logging.warning("No board mappings found. Please set BOARD_MAPPING_JSON secret.")
         return
 
     state = load_json(STATE_FILE, {"board_index": 0, "last_report_date": ""})
@@ -227,28 +233,35 @@ def main():
 
     posted_successfully = False
 
+    # Round-Robin Traversal
     for i in range(total_boards):
         curr_index = (start_index + i) % total_boards
         board_id = sorted_board_ids[curr_index]
         board_name = board_mapping[board_id]
 
-        is_hot_board = any(kw in board_name.lower() for kw in HOT_KEYWORDS)
+        # Requirement 14: Check if board is "Special"
+        is_special_board = (board_name.strip().lower() == "special")
+        
         posted_ids = load_posted_ids(board_id)
 
+        # Requirement 16: Fetch pins from Main Board + Sub-boards
         all_pins = get_pins_from_target(access_token, board_id, is_section=False)
         sub_sections = get_board_sections(access_token, board_id)
         for sec_id in sub_sections:
             all_pins.extend(get_pins_from_target(access_token, sec_id, is_section=True))
 
+        # Requirement 4 & 5: Filter unposted items
         unposted = [p for p in all_pins if p.get("id") not in posted_ids]
 
         if not unposted:
-            logging.info(f"Board '{board_name}' has no new items. Skipping to next board...")
+            logging.info(f"Board '{board_name}' is empty or fully posted. Skipping...")
             continue
 
+        # Requirement 9: Random selection from available pins
         selected_pin = random.choice(unposted)
         pin_id = selected_pin.get("id")
 
+        # Requirement 8: Media identification (Images & Videos)
         media = selected_pin.get("media", {})
         media_type = media.get("media_type", "")
         
@@ -263,14 +276,17 @@ def main():
             images = media.get("images", {})
             media_url = images.get("originals", {}).get("url") or images.get("600x", {}).get("url")
 
-        if media_url and post_media_to_telegram(media_url, is_video, is_hot_board, board_name):
-            logging.info(f"Successfully posted Pin {pin_id} from '{board_name}'")
+        if media_url and post_media_to_telegram(media_url, is_video, is_special_board, board_name):
+            logging.info(f"Successfully posted Pin {pin_id} from Board '{board_name}'")
             
+            # Fast File Append (Requirement 3 & 11)
             append_posted_id(board_id, pin_id)
 
+            # Move pointer to the next board for next run
             state["board_index"] = (curr_index + 1) % total_boards
             posted_successfully = True
 
+            # Track Daily Analytics
             today = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%Y-%m-%d")
             if today not in stats:
                 stats[today] = {}
@@ -287,6 +303,7 @@ def main():
     save_json(STATE_FILE, state)
     save_json(STATS_FILE, stats)
 
+    # Daily Analytics Report (Runs on first trigger after 8:00 PM IST)
     ist = pytz.timezone('Asia/Kolkata')
     now_ist = datetime.now(ist)
     today_str = now_ist.strftime("%Y-%m-%d")
@@ -313,4 +330,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
