@@ -20,7 +20,7 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests pytz
 
       - name: Run Main Script
         env:
@@ -33,7 +33,7 @@ jobs:
           ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
         run: python main.py
 
-      - name: Save Bot State
+      - name: Save Bot State & Prevent Board Repeat
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
