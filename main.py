@@ -9,11 +9,11 @@ PINTEREST_APP_ID = os.getenv("PINTEREST_APP_ID")
 PINTEREST_APP_SECRET = os.getenv("PINTEREST_APP_SECRET")
 PINTEREST_REFRESH_TOKEN = os.getenv("PINTEREST_REFRESH_TOKEN")
 
-# Channel Telegram Details (Main Channel Bot)
+# Channel Telegram Details
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Personal Admin Telegram Details (Admin Private Bot)
+# Personal Admin Telegram Details
 ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
@@ -25,13 +25,18 @@ def load_json(filepath, default):
         try:
             with open(filepath, "r") as f:
                 return json.load(f)
-        except Exception:
+        except Exception as e:
+            print(f"Error loading {filepath}: {e}")
             return default
     return default
 
 def save_json(filepath, data):
-    with open(filepath, "w") as f:
-        json.dump(data, f, indent=4)
+    try:
+        with open(filepath, "w") as f:
+            json.dump(data, f, indent=4)
+        print(f"Successfully saved {filepath}")
+    except Exception as e:
+        print(f"Error saving {filepath}: {e}")
 
 def get_pinterest_access_token():
     url = "https://api.pinterest.com/v5/oauth/token"
@@ -47,13 +52,13 @@ def get_pinterest_access_token():
     return None
 
 def get_user_boards(access_token):
-    """Pinterest బోర్డుల IDలు మరియు వాటి పేర్లను తెచ్చుకునే ఫంక్షన్"""
     url = "https://api.pinterest.com/v5/boards"
     headers = {"Authorization": f"Bearer {access_token}"}
     res = requests.get(url, headers=headers)
     if res.ok:
         items = res.json().get("items", [])
         return [{"id": board["id"], "name": board.get("name", "Pinterest")} for board in items]
+    print(f"Failed to fetch boards: {res.text}")
     return []
 
 def get_pins_from_board(access_token, board_id):
@@ -65,12 +70,9 @@ def get_pins_from_board(access_token, board_id):
     return []
 
 def send_telegram_photo(image_url, caption, board_name):
-    """
-    Main Channel కి ఫోటో మరియు Inline Keyboard Button పంపే ఫంక్షన్.
-    Inline Button ఛానెల్‌లో మాత్రమే కనిపిస్తుంది, గ్రూప్‌లోకి వెళ్లేసరికి టెలిగ్రామ్ దానిని తీసివేస్తుంది.
-    """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     
+    # Channel లో మాత్రమే బటన్ కనిపిస్తుంది (Group లో కట్ అవుతుంది)
     reply_markup = {
         "inline_keyboard": [
             [
@@ -89,12 +91,13 @@ def send_telegram_photo(image_url, caption, board_name):
         "reply_markup": json.dumps(reply_markup)
     }
     res = requests.post(url, json=payload)
+    if not res.ok:
+        print(f"Failed to send photo to Telegram: {res.text}")
     return res.ok
 
 def send_admin_report(report_text):
-    """Admin Bot ద్వారా ప్రైవేట్‌గా మీకు మాత్రమే రిపోర్ట్ పంపే ఫంక్షన్"""
     if not ADMIN_BOT_TOKEN or not ADMIN_CHAT_ID:
-        print("Admin Bot secrets are missing. Skipping admin report.")
+        print("Admin Bot secrets missing. Skipping report.")
         return
     
     url = f"https://api.telegram.org/bot{ADMIN_BOT_TOKEN}/sendMessage"
@@ -124,14 +127,16 @@ def main():
         return
 
     total_boards = len(boards)
-    start_index = state.get("board_index", 0) % total_boards
+    current_start_index = state.get("board_index", 0) % total_boards
     
+    print(f"Total Boards: {total_boards} | Starting Board Index: {current_start_index}")
+
     posted_successfully = False
     
-    # Round-Robin Traversal
+    # ప్రతీ బోర్డును ఒకదాని తర్వాత ఒకటి చెక్ చేసే లాజిక్
     for i in range(total_boards):
-        current_board_index = (start_index + i) % total_boards
-        board_info = boards[current_board_index]
+        eval_index = (current_start_index + i) % total_boards
+        board_info = boards[eval_index]
         board_id = board_info["id"]
         board_name = board_info["name"]
 
@@ -139,6 +144,7 @@ def main():
 
         for pin in pins:
             pin_id = pin.get("id")
+            # పాత పిన్ అయితే స్కిప్ చేస్తుంది
             if pin_id in posted_pins:
                 continue
 
@@ -149,20 +155,25 @@ def main():
             if image_url:
                 caption = pin.get("title") or pin.get("description") or ""
                 
-                # Inline Button తో Telegram Channel కి పంపడం
                 if send_telegram_photo(image_url, caption, board_name):
-                    print(f"Posted Pin ID {pin_id} from Board: {board_name}")
+                    print(f"✅ SUCCESS: Posted Pin {pin_id} from Board: {board_name} (Index {eval_index})")
                     posted_pins.add(pin_id)
                     
-                    # Next Board Index Update
-                    state["board_index"] = (current_board_index + 1) % total_boards
+                    # తదుపరి రన్ కోసం బోర్డు ఇండెక్స్‌ను కచ్చితంగా ముందుకు జరుపుతుంది
+                    next_board_index = (eval_index + 1) % total_boards
+                    state["board_index"] = next_board_index
+                    print(f"🔄 Next run will start at Board Index: {next_board_index}")
+                    
                     posted_successfully = True
                     break
 
         if posted_successfully:
             break
 
-    # Save State & Posted Pins locally
+    if not posted_successfully:
+        print("No new pins found across any boards.")
+
+    # State & Posted Pins కచ్చితంగా ఫైల్స్‌కి సేవ్ చేయడం
     save_json(STATE_FILE, state)
     save_json(POSTED_PINS_FILE, list(posted_pins))
 
@@ -176,7 +187,7 @@ def main():
             f"📊 *Daily Analytics Summary ({today_str})*\n\n"
             f"✅ Total Unique Pins Posted: {len(posted_pins)}\n"
             f"🔄 Next Board Index: {state.get('board_index')}\n"
-            f"🚀 Bot Status: Working smoothly without duplicate board repetition!"
+            f"🚀 Bot Status: Working smoothly!"
         )
         send_admin_report(report_msg)
         state["last_report_date"] = today_str
