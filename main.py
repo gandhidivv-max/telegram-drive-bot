@@ -4,16 +4,16 @@ import requests
 from datetime import datetime
 import pytz
 
-# Secrets
+# Secrets from GitHub Environment
 PINTEREST_APP_ID = os.getenv("PINTEREST_APP_ID")
 PINTEREST_APP_SECRET = os.getenv("PINTEREST_APP_SECRET")
 PINTEREST_REFRESH_TOKEN = os.getenv("PINTEREST_REFRESH_TOKEN")
 
-# Channel Telegram Details
+# Channel Telegram Details (Main Channel Bot)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Personal Admin Telegram Details
+# Personal Admin Telegram Details (Admin Private Bot)
 ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
@@ -63,7 +63,7 @@ def get_pins_from_board(access_token, board_id):
     return []
 
 def send_telegram_photo(image_url, caption):
-    """Main Channel కి ఫోటో పోస్ట్ చేసే ఫంక్షన్"""
+    """Main Channel కి మాత్రమే ఫోటో పోస్ట్ చేసే ఫంక్షన్"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -74,7 +74,7 @@ def send_telegram_photo(image_url, caption):
     return res.ok
 
 def send_admin_report(report_text):
-    """మీ Admin Bot ద్వారా పర్సనల్‌గా మీకు మాత్రమే మెసేజ్ పంపే ఫంక్షన్"""
+    """Admin Bot ద్వారా ప్రైవేట్‌గా మీకు మాత్రమే రిపోర్ట్ పంపే ఫంక్షన్"""
     if not ADMIN_BOT_TOKEN or not ADMIN_CHAT_ID:
         print("Admin Bot secrets are missing. Skipping admin report.")
         return
@@ -110,7 +110,7 @@ def main():
     
     posted_successfully = False
     
-    # Round-Robin: ఒక బోర్డ్ నుంచి ఇంకో బోర్డుకి వెళ్లే లాజిక్
+    # Round-Robin Traversal
     for i in range(total_boards):
         current_board_index = (start_index + i) % total_boards
         board_id = boards[current_board_index]
@@ -121,7 +121,6 @@ def main():
             if pin_id in posted_pins:
                 continue
 
-            # ఫోటో యొక్క URL తీసుకోవడం
             media = pin.get("media", {})
             images = media.get("images", {})
             image_url = images.get("originals", {}).get("url") or images.get("600x", {}).get("url")
@@ -132,7 +131,7 @@ def main():
                     print(f"Posted Pin ID {pin_id} from Board Index {current_board_index}")
                     posted_pins.add(pin_id)
                     
-                    # తర్వాతి రన్ కోసం Next Board Index కి మార్చడం
+                    # Next Board Index Update
                     state["board_index"] = (current_board_index + 1) % total_boards
                     posted_successfully = True
                     break
@@ -140,11 +139,11 @@ def main():
         if posted_successfully:
             break
 
-    # State & Posted Pins సేవ్ చేయడం
+    # Save State & Posted Pins locally
     save_json(STATE_FILE, state)
     save_json(POSTED_PINS_FILE, list(posted_pins))
 
-    # Daily Analytics Report (IST ప్రకారం రాత్రి 8 PM దాటాక)
+    # Daily Analytics Report (IST రాత్రి 8 PM దాటాక)
     ist = pytz.timezone('Asia/Kolkata')
     now_ist = datetime.now(ist)
     today_str = now_ist.strftime("%Y-%m-%d")
@@ -162,4 +161,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+        
