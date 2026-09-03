@@ -7,14 +7,14 @@ import requests
 from datetime import datetime
 import pytz
 
-# Detailed Logging Mechanism (Requirement 7)
+# Detailed Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[logging.StreamHandler()]
 )
 
-# Fetching Secrets & Configuration (Requirement 1)
+# Existing GitHub Secrets
 PINTEREST_APP_ID = os.getenv("PINTEREST_APP_ID")
 PINTEREST_APP_SECRET = os.getenv("PINTEREST_APP_SECRET")
 PINTEREST_REFRESH_TOKEN = os.getenv("PINTEREST_REFRESH_TOKEN")
@@ -25,14 +25,20 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
-BOARD_MAPPING_JSON = os.getenv("BOARD_MAPPING_JSON", "{}")
+# -------------------------------------------------------------
+# బోర్డ్ ఐడీలు మరియు పేర్లు నేరుగా ఇక్కడే ఇవ్వండి (Secrets అవసరం లేదు)
+# -------------------------------------------------------------
+BOARD_MAPPING = {
+    "123456789012345678": "Special",
+    "987654321098765432": "Wallpapers"
+    # మీ మరిన్ని బోర్డులను ఇక్కడ యాడ్ చేసుకోవచ్చు
+}
 
 STATE_FILE = "state.json"
 CONTROL_FILE = "bot_control.json"
 STATS_FILE = "daily_stats.json"
 
-# ----------------- Helper Functions ----------------- #
-
+# Helper Functions
 def load_json(filepath, default):
     if os.path.exists(filepath):
         try:
@@ -47,11 +53,10 @@ def save_json(filepath, data):
     try:
         with open(filepath, "w") as f:
             json.dump(data, f, indent=4)
-        logging.info(f"Successfully saved {filepath}")
+        logging.info(f"Saved {filepath}")
     except Exception as e:
         logging.error(f"Error saving {filepath}: {e}")
 
-# Fast Search via Set Data Structure (Requirement 3, 6, 11, 15)
 def load_posted_ids(board_id):
     file_path = f"posted_{board_id}.txt"
     if os.path.exists(file_path):
@@ -64,7 +69,16 @@ def append_posted_id(board_id, item_id):
     with open(file_path, "a") as f:
         f.write(f"{item_id}\n")
 
-# Smart Backoff Anti-Block System (Rate Limiting)
+def send_admin_report(report_text):
+    if not ADMIN_BOT_TOKEN or not ADMIN_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{ADMIN_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": ADMIN_CHAT_ID, "text": report_text, "parse_mode": "Markdown"}
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        logging.error(f"Failed to send admin report: {e}")
+
 def api_request_with_backoff(url, method="GET", headers=None, data=None, json_payload=None, auth=None):
     max_retries = 5
     delay = 1
@@ -75,7 +89,7 @@ def api_request_with_backoff(url, method="GET", headers=None, data=None, json_pa
             else:
                 res = requests.post(url, headers=headers, data=data, json=json_payload, auth=auth, timeout=15)
 
-            if res and res.status_code == 429:
+            if res is not None and res.status_code == 429:
                 logging.warning(f"Rate limited (429). Retrying in {delay}s...")
                 time.sleep(delay)
                 delay *= 2
@@ -87,7 +101,6 @@ def api_request_with_backoff(url, method="GET", headers=None, data=None, json_pa
             delay *= 2
     return None
 
-# Telegram Pause/Resume Command Handler (Requirement 13)
 def check_telegram_commands():
     if not ADMIN_BOT_TOKEN:
         return True
@@ -114,8 +127,7 @@ def check_telegram_commands():
     
     return not control.get("is_paused", False)
 
-# ----------------- Pinterest API Section ----------------- #
-
+# Pinterest API
 def get_pinterest_access_token():
     url = "https://api.pinterest.com/v5/oauth/token"
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
@@ -128,12 +140,12 @@ def get_pinterest_access_token():
     if res and res.ok:
         return res.json().get("access_token")
     
-    logging.critical("Pinterest Refresh Token Expired or Invalid!")
-    send_admin_report("🚨 **CRITICAL ALERT**: Pinterest Refresh Token is expired or invalid! Please re-authenticate.")
+    err_msg = res.text if res else "No Response"
+    logging.critical(f"Pinterest Refresh Token Failure: {err_msg}")
+    send_admin_report(f"🚨 **CRITICAL ALERT**: Pinterest Token Error!\n`{err_msg}`")
     return None
 
 def get_board_sections(access_token, board_id):
-    """Sub-boards/Sections Support (Requirement 16)"""
     url = f"https://api.pinterest.com/v5/boards/{board_id}/sections"
     headers = {"Authorization": f"Bearer {access_token}"}
     res = api_request_with_backoff(url, headers=headers)
@@ -151,16 +163,33 @@ def get_pins_from_target(access_token, target_id, is_section=False):
     res = api_request_with_backoff(url, headers=headers)
     if res and res.ok:
         return res.json().get("items", [])
+    logging.error(f"Failed to fetch pins for ID {target_id}: {res.text if res else 'No Response'}")
     return []
 
-# ----------------- Telegram Dispatcher ----------------- #
+def extract_media_info(pin):
+    media = pin.get("media", {})
+    media_type = media.get("media_type", "")
+    
+    if media_type == "video":
+        video_list = media.get("videos", {}).get("video_list", {})
+        for v_key in ["V_720P", "V_EXP3", "V_480P", "V_360P"]:
+            if v_key in video_list and "url" in video_list[v_key]:
+                return video_list[v_key]["url"], True
+                
+    images = media.get("images", {})
+    if not images and "media" in pin:
+        images = pin.get("media", {}).get("images", {})
+        
+    for i_key in ["originals", "1200x", "600x", "400x300"]:
+        if i_key in images and "url" in images[i_key]:
+            return images[i_key]["url"], False
+            
+    if "image_large_url" in pin:
+        return pin["image_large_url"], False
+
+    return None, False
 
 def post_media_to_telegram(media_url, is_video, is_special_board, board_name):
-    """
-    - Spoiler/Blur: Applied ONLY if board is "Special" (Requirement 14)
-    - Protection: protect_content=True
-    - Inline Button: Visible only in Channel, hidden in linked group
-    """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/" + ("sendVideo" if is_video else "sendPhoto")
     
     reply_markup = {
@@ -181,7 +210,6 @@ def post_media_to_telegram(media_url, is_video, is_special_board, board_name):
         "reply_markup": json.dumps(reply_markup)
     }
     
-    # Requirement 14: Only "Special" board images get blurred
     if is_special_board:
         payload["has_spoiler"] = True
 
@@ -189,40 +217,28 @@ def post_media_to_telegram(media_url, is_video, is_special_board, board_name):
     if res and res.ok:
         return True
     
-    logging.error(f"Telegram Posting Failed: {res.text if res else 'No Response'}")
+    err_text = res.text if res else "No Response"
+    logging.error(f"Telegram Posting Failed: {err_text}")
+    send_admin_report(f"❌ **Telegram Post Error**:\n`{err_text}`")
     return False
 
-def send_admin_report(report_text):
-    if not ADMIN_BOT_TOKEN or not ADMIN_CHAT_ID:
-        return
-    url = f"https://api.telegram.org/bot{ADMIN_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": ADMIN_CHAT_ID, "text": report_text, "parse_mode": "Markdown"}
-    api_request_with_backoff(url, method="POST", json_payload=payload)
-
-# ----------------- Engine Execution ----------------- #
-
+# Main Execution Process
 def main():
-    logging.info("Initializing Pinterest Engine Process...")
+    logging.info("Starting Pinterest Engine Process...")
 
     if not check_telegram_commands():
-        logging.info("Bot is currently PAUSED via Telegram command. Exiting.")
+        logging.info("Bot is currently PAUSED. Exiting.")
         return
-
-    try:
-        board_mapping = json.loads(BOARD_MAPPING_JSON)
-    except Exception as e:
-        logging.error(f"Failed to parse BOARD_MAPPING_JSON: {e}")
-        board_mapping = {}
 
     access_token = get_pinterest_access_token()
     if not access_token:
         return
 
-    # Requirement 2: Ascending Order sorting by Board Names
-    sorted_board_ids = sorted(board_mapping.keys(), key=lambda b_id: board_mapping[b_id].lower())
+    # Sort Boards A to Z by Name
+    sorted_board_ids = sorted(BOARD_MAPPING.keys(), key=lambda b_id: str(BOARD_MAPPING[b_id]).lower())
     
     if not sorted_board_ids:
-        logging.warning("No board mappings found. Please set BOARD_MAPPING_JSON secret.")
+        logging.warning("No board mappings defined in main.py.")
         return
 
     state = load_json(STATE_FILE, {"board_index": 0, "last_report_date": ""})
@@ -233,77 +249,64 @@ def main():
 
     posted_successfully = False
 
-    # Round-Robin Traversal
     for i in range(total_boards):
         curr_index = (start_index + i) % total_boards
         board_id = sorted_board_ids[curr_index]
-        board_name = board_mapping[board_id]
+        board_name = str(BOARD_MAPPING[board_id])
 
-        # Requirement 14: Check if board is "Special"
         is_special_board = (board_name.strip().lower() == "special")
-        
         posted_ids = load_posted_ids(board_id)
 
-        # Requirement 16: Fetch pins from Main Board + Sub-boards
         all_pins = get_pins_from_target(access_token, board_id, is_section=False)
         sub_sections = get_board_sections(access_token, board_id)
         for sec_id in sub_sections:
             all_pins.extend(get_pins_from_target(access_token, sec_id, is_section=True))
 
-        # Requirement 4 & 5: Filter unposted items
-        unposted = [p for p in all_pins if p.get("id") not in posted_ids]
+        unposted = [p for p in all_pins if str(p.get("id")) not in posted_ids]
 
         if not unposted:
-            logging.info(f"Board '{board_name}' is empty or fully posted. Skipping...")
+            logging.info(f"Board '{board_name}' ({board_id}) has no new items. Skipping...")
             continue
 
-        # Requirement 9: Random selection from available pins
-        selected_pin = random.choice(unposted)
-        pin_id = selected_pin.get("id")
-
-        # Requirement 8: Media identification (Images & Videos)
-        media = selected_pin.get("media", {})
-        media_type = media.get("media_type", "")
+        random.shuffle(unposted)
         
-        is_video = False
-        media_url = None
+        for selected_pin in unposted:
+            pin_id = str(selected_pin.get("id"))
+            media_url, is_video = extract_media_info(selected_pin)
 
-        if media_type == "video":
-            is_video = True
-            video_images = media.get("videos", {}).get("video_list", {})
-            media_url = video_images.get("V_720P", {}).get("url") or video_images.get("V_EXP3", {}).get("url")
-        else:
-            images = media.get("images", {})
-            media_url = images.get("originals", {}).get("url") or images.get("600x", {}).get("url")
+            if not media_url:
+                continue
 
-        if media_url and post_media_to_telegram(media_url, is_video, is_special_board, board_name):
-            logging.info(f"Successfully posted Pin {pin_id} from Board '{board_name}'")
-            
-            # Fast File Append (Requirement 3 & 11)
-            append_posted_id(board_id, pin_id)
+            if post_media_to_telegram(media_url, is_video, is_special_board, board_name):
+                logging.info(f"Successfully posted Pin {pin_id} from Board '{board_name}'")
+                
+                append_posted_id(board_id, pin_id)
+                state["board_index"] = (curr_index + 1) % total_boards
+                posted_successfully = True
 
-            # Move pointer to the next board for next run
-            state["board_index"] = (curr_index + 1) % total_boards
-            posted_successfully = True
+                today = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%Y-%m-%d")
+                if today not in stats:
+                    stats[today] = {}
+                if board_name not in stats[today]:
+                    stats[today][board_name] = {"images": 0, "videos": 0}
 
-            # Track Daily Analytics
-            today = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%Y-%m-%d")
-            if today not in stats:
-                stats[today] = {}
-            if board_name not in stats[today]:
-                stats[today][board_name] = {"images": 0, "videos": 0}
+                if is_video:
+                    stats[today][board_name]["videos"] += 1
+                else:
+                    stats[today][board_name]["images"] += 1
 
-            if is_video:
-                stats[today][board_name]["videos"] += 1
-            else:
-                stats[today][board_name]["images"] += 1
+                break
 
+        if posted_successfully:
             break
+
+    if not posted_successfully:
+        logging.info("No media posted in this run.")
 
     save_json(STATE_FILE, state)
     save_json(STATS_FILE, stats)
 
-    # Daily Analytics Report (Runs on first trigger after 8:00 PM IST)
+    # Daily Report at 8 PM IST
     ist = pytz.timezone('Asia/Kolkata')
     now_ist = datetime.now(ist)
     today_str = now_ist.strftime("%Y-%m-%d")
@@ -330,3 +333,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+                
