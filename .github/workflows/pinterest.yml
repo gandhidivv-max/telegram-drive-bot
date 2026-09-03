@@ -2,8 +2,8 @@ name: Pinterest Bot Runner
 
 on:
   workflow_dispatch:
-  repository_dispatch:
-    types: [pinterest_trigger]
+  schedule:
+    - cron: '0 * * * *' # ప్రతీ గంటకు ఒకసారి ఆటోమేటిక్‌గా రన్ అవ్వడానికి
 
 jobs:
   run-bot:
@@ -31,13 +31,16 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ADMIN_BOT_TOKEN: ${{ secrets.ADMIN_BOT_TOKEN }}
           ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+          # JSON format mapping: '{"12345678": "Special", "87654321": "Wallpapers"}'
+          BOARD_MAPPING_JSON: ${{ secrets.BOARD_MAPPING_JSON }}
         run: python main.py
 
-      - name: Save Bot State & Prevent Board Repeat
+      - name: Save Bot State and Text Files Safely (Data Loss Prevention)
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add state.json posted_pins.json
-          git commit -m "Update state and posted pins [skip ci]" || exit 0
+          git add state.json posted_*.txt bot_control.json daily_stats.json || true
+          git pull --rebase origin main || true
+          git commit -m "Update state and individual board text files [skip ci]" || exit 0
           git push
           
