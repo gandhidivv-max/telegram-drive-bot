@@ -1,343 +1,164 @@
 import os
-import sys
-import random
-import time
-import requests
 import json
-from datetime import datetime, timedelta, timezone
+import requests
+from datetime import datetime
+import pytz
 
-# ==========================================
-# 1. CONFIGURATION & ENVIRONMENT VARIABLES
-# ==========================================
-APP_ID = os.environ.get("PINTEREST_APP_ID")
-APP_SECRET = os.environ.get("PINTEREST_APP_SECRET")
-REFRESH_TOKEN = os.environ.get("PINTEREST_REFRESH_TOKEN")
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", TELEGRAM_CHAT_ID)
+# Secrets
+PINTEREST_APP_ID = os.getenv("PINTEREST_APP_ID")
+PINTEREST_APP_SECRET = os.getenv("PINTEREST_APP_SECRET")
+PINTEREST_REFRESH_TOKEN = os.getenv("PINTEREST_REFRESH_TOKEN")
 
-# Directories & State files
-HISTORY_DIR = "history"
-STATE_FILE = "bot_state.json"
-DAILY_REPORT_FILE = "daily_report.json"
+# Channel Telegram Details
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-if not os.path.exists(HISTORY_DIR):
-    os.makedirs(HISTORY_DIR)
+# Personal Admin Telegram Details
+ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
-# ==========================================
-# 2. LOGGING & UTILITY FUNCTIONS
-# ==========================================
-def log(message, level="INFO"):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] [{level}] {message}")
-    sys.stdout.flush()
-
-def safe_api_request(method, url, **kwargs):
-    """ Exponential Backoff Algorithm for 429 Anti-Block System """
-    retries = 5
-    delay = 1
-    for i in range(retries):
-        try:
-            response = requests.request(method, url, **kwargs)
-            if response.status_code == 429:
-                log(f"⚠️ Rate limited (429). Retrying in {delay}s...", level="WARNING")
-                time.sleep(delay)
-                delay *= 2
-                continue
-            return response
-        except Exception as e:
-            log(f"❌ Network Error: {e}. Retrying in {delay}s...", level="ERROR")
-            time.sleep(delay)
-            delay *= 2
-    return None
-
-# ==========================================
-# 3. TELEGRAM COMMANDS & MEDIA SENDER
-# ==========================================
-def check_pause_status():
-    """ Handles /pause and /resume commands via Telegram Updates """
-    state = load_json(STATE_FILE, default={"last_board_index": -1, "is_paused": False})
-    
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-    res = safe_api_request("GET", url)
-    if res and res.status_code == 200:
-        updates = res.json().get("result", [])
-        for update in updates:
-            message = update.get("message", {})
-            text = message.get("text", "").strip()
-            if text == "/pause":
-                state["is_paused"] = True
-                save_json(STATE_FILE, state)
-                log("⏸️ Bot PAUSED via Telegram command.", level="WARNING")
-            elif text == "/resume":
-                state["is_paused"] = False
-                save_json(STATE_FILE, state)
-                log("▶️ Bot RESUMED via Telegram command.", level="INFO")
-                
-    return state.get("is_paused", False)
-
-def send_telegram_media(media_url, board_name, is_video=False, is_spoiler=False):
-    """ Sends Image/Video with Board Name as Inline Button """
-    endpoint = "sendVideo" if is_video else "sendPhoto"
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{endpoint}"
-    
-    reply_markup = {
-        "inline_keyboard": [[
-            {"text": f"📁 Board: {board_name}", "callback_data": "board_info"}
-        ]]
-    }
-
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        ("video" if is_video else "photo"): media_url,
-        "protect_content": True,
-        "has_spoiler": is_spoiler,
-        "reply_markup": json.dumps(reply_markup)
-    }
-
-    res = safe_api_request("POST", url, data=payload)
-    if res and res.status_code == 200:
-        log(f"✅ Posted to Telegram successfully from '{board_name}'.")
-        return True
-    else:
-        err_msg = res.text if res else "No Response"
-        log(f"❌ Failed to post to Telegram: {err_msg}", level="ERROR")
-        return False
-
-def send_telegram_message(chat_id, text):
-    """ Simple Text Message Sender for Daily Admin Report """
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    safe_api_request("POST", url, data=payload)
-
-# ==========================================
-# 4. FAST O(1) HISTORY RECORD STORAGE
-# ==========================================
-def get_history_filepath(board_id):
-    safe_id = "".join([c for c in board_id if c.isalnum() or c in ('-', '_')])
-    return os.path.join(HISTORY_DIR, f"posted_{safe_id}.txt")
-
-def load_posted_ids(board_id):
-    filepath = get_history_filepath(board_id)
-    if not os.path.exists(filepath):
-        return set()
-    with open(filepath, "r", encoding="utf-8") as f:
-        return set(line.strip() for line in f if line.strip())
-
-def record_posted_id(board_id, item_id):
-    filepath = get_history_filepath(board_id)
-    with open(filepath, "a", encoding="utf-8") as f:
-        f.write(f"{item_id}\n")
+STATE_FILE = "state.json"
+POSTED_PINS_FILE = "posted_pins.json"
 
 def load_json(filepath, default):
     if os.path.exists(filepath):
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, "r") as f:
                 return json.load(f)
         except Exception:
             return default
     return default
 
 def save_json(filepath, data):
-    with open(filepath, "w", encoding="utf-8") as f:
+    with open(filepath, "w") as f:
         json.dump(data, f, indent=4)
 
-# ==========================================
-# 5. PINTEREST API INTEGRATION
-# ==========================================
-def get_access_token():
+def get_pinterest_access_token():
     url = "https://api.pinterest.com/v5/oauth/token"
-    payload = {
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    data = {
         "grant_type": "refresh_token",
-        "refresh_token": REFRESH_TOKEN
+        "refresh_token": PINTEREST_REFRESH_TOKEN,
     }
-    res = safe_api_request("POST", url, data=payload, auth=(APP_ID, APP_SECRET))
-    if res and res.status_code == 200:
-        log("✅ Access Token Refreshed!")
+    res = requests.post(url, headers=headers, data=data, auth=(PINTEREST_APP_ID, PINTEREST_APP_SECRET))
+    if res.ok:
         return res.json().get("access_token")
-    log("❌ Access Token Refresh Failed!", level="ERROR")
+    print(f"Failed to get access token: {res.text}")
     return None
 
-def fetch_boards_and_subboards(access_token):
+def get_user_boards(access_token):
     url = "https://api.pinterest.com/v5/boards"
     headers = {"Authorization": f"Bearer {access_token}"}
-    res = safe_api_request("GET", url, headers=headers)
-    
-    all_targets = []
-    if res and res.status_code == 200:
-        boards = res.json().get("items", [])
-        for b in boards:
-            if b["name"].strip().lower() == "quick saves":
-                continue
+    res = requests.get(url, headers=headers)
+    if res.ok:
+        return [board["id"] for board in res.json().get("items", [])]
+    return []
 
-            all_targets.append({
-                "id": b["id"],
-                "name": b["name"],
-                "is_subboard": False
-            })
-            sub_url = f"https://api.pinterest.com/v5/boards/{b['id']}/sections"
-            sub_res = safe_api_request("GET", sub_url, headers=headers)
-            if sub_res and sub_res.status_code == 200:
-                sub_boards = sub_res.json().get("items", [])
-                for sb in sub_boards:
-                    all_targets.append({
-                        "id": sb["id"],
-                        "name": f"{b['name']} > {sb['name']}",
-                        "is_subboard": True,
-                        "parent_id": b["id"]
-                    })
-                    
-    all_targets.sort(key=lambda x: x["name"].lower())
-    log(f"📋 Total Boards/Sub-boards Detected & Sorted: {len(all_targets)}")
-    return all_targets
-
-def fetch_pins_from_board(access_token, target):
+def get_pins_from_board(access_token, board_id):
+    url = f"https://api.pinterest.com/v5/boards/{board_id}/pins"
     headers = {"Authorization": f"Bearer {access_token}"}
-    if target["is_subboard"]:
-        url = f"https://api.pinterest.com/v5/boards/{target['parent_id']}/sections/{target['id']}/pins"
-    else:
-        url = f"https://api.pinterest.com/v5/boards/{target['id']}/pins"
-        
-    res = safe_api_request("GET", url, headers=headers)
-    if res and res.status_code == 200:
+    res = requests.get(url, headers=headers)
+    if res.ok:
         return res.json().get("items", [])
     return []
 
-# ==========================================
-# 6. MAIN ENGINE WORKFLOW
-# ==========================================
-def main():
-    log("🚀 Script execution started.")
+def send_telegram_photo(image_url, caption):
+    """Main Channel కి ఫోటో పోస్ట్ చేసే ఫంక్షన్"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "photo": image_url,
+        "caption": caption
+    }
+    res = requests.post(url, json=payload)
+    return res.ok
 
-    # 1. Check Pause Status
-    if check_pause_status():
-        log("⏸️ Execution skipped. Bot is currently PAUSED.", level="WARNING")
+def send_admin_report(report_text):
+    """మీ Admin Bot ద్వారా పర్సనల్‌గా మీకు మాత్రమే మెసేజ్ పంపే ఫంక్షన్"""
+    if not ADMIN_BOT_TOKEN or not ADMIN_CHAT_ID:
+        print("Admin Bot secrets are missing. Skipping admin report.")
         return
+    
+    url = f"https://api.telegram.org/bot{ADMIN_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": ADMIN_CHAT_ID,
+        "text": report_text,
+        "parse_mode": "Markdown"
+    }
+    try:
+        res = requests.post(url, json=payload)
+        if not res.ok:
+            print(f"Failed to send Admin Report: {res.text}")
+    except Exception as e:
+        print(f"Error sending Admin Report: {e}")
 
-    # 2. Get Access Token
-    access_token = get_access_token()
+def main():
+    state = load_json(STATE_FILE, {"board_index": 0, "last_report_date": ""})
+    posted_pins = set(load_json(POSTED_PINS_FILE, []))
+
+    access_token = get_pinterest_access_token()
     if not access_token:
         return
 
-    # 3. Fetch Boards
-    targets = fetch_boards_and_subboards(access_token)
-    if not targets:
-        log("⚠️ No valid public boards found.", level="WARNING")
+    boards = get_user_boards(access_token)
+    if not boards:
+        print("No boards found.")
         return
 
-    # Round-Robin State Tracking
-    state = load_json(STATE_FILE, default={"last_board_index": -1, "is_paused": False})
-    last_idx = state.get("last_board_index", -1)
+    total_boards = len(boards)
+    start_index = state.get("board_index", 0) % total_boards
     
-    start_index = (last_idx + 1) % len(targets)
-
-    posted = False
-    report_data = load_json(DAILY_REPORT_FILE, default={"images": 0, "videos": 0, "boards": {}, "last_report_date": ""})
-
-    for idx_offset in range(len(targets)):
-        current_idx = (start_index + idx_offset) % len(targets)
-        target = targets[current_idx]
-        board_id = target["id"]
-        board_name = target["name"]
-
-        log(f"🔍 Checking Board [{current_idx + 1}/{len(targets)}]: {board_name}")
-
-        posted_ids = load_posted_ids(board_id)
-        pins = fetch_pins_from_board(access_token, target)
-
-        if not pins:
-            log(f"⏩ Board '{board_name}' has no pins or finished. Skipping.")
-            continue
-
-        random.shuffle(pins)
+    posted_successfully = False
+    
+    # Round-Robin: ఒక బోర్డ్ నుంచి ఇంకో బోర్డుకి వెళ్లే లాజిక్
+    for i in range(total_boards):
+        current_board_index = (start_index + i) % total_boards
+        board_id = boards[current_board_index]
+        pins = get_pins_from_board(access_token, board_id)
 
         for pin in pins:
             pin_id = pin.get("id")
-            if pin_id in posted_ids:
+            if pin_id in posted_pins:
                 continue
 
+            # ఫోటో యొక్క URL తీసుకోవడం
             media = pin.get("media", {})
-            media_type = media.get("media_type", "image")
-            
-            media_url = None
-            is_video = False
+            images = media.get("images", {})
+            image_url = images.get("originals", {}).get("url") or images.get("600x", {}).get("url")
 
-            if media_type == "video":
-                is_video = True
-                media_url = media.get("video_list", {}).get("V_720P", {}).get("url")
-            else:
-                images = media.get("images", {})
-                media_url = images.get("600x", {}).get("url") or images.get("originals", {}).get("url")
+            if image_url:
+                caption = pin.get("title") or pin.get("description") or ""
+                if send_telegram_photo(image_url, caption):
+                    print(f"Posted Pin ID {pin_id} from Board Index {current_board_index}")
+                    posted_pins.add(pin_id)
+                    
+                    # తర్వాతి రన్ కోసం Next Board Index కి మార్చడం
+                    state["board_index"] = (current_board_index + 1) % total_boards
+                    posted_successfully = True
+                    break
 
-            if not media_url:
-                continue
-
-            is_spoiler = "special" in board_name.lower()
-            if is_spoiler:
-                log(f"🔞 Board name contains 'special'. Enabling Blur (Spoiler).")
-
-            log(f"📤 Posting media {pin_id} from '{board_name}'...")
-            success = send_telegram_media(media_url, board_name=board_name, is_video=is_video, is_spoiler=is_spoiler)
-
-            if success:
-                record_posted_id(board_id, pin_id)
-                
-                state["last_board_index"] = current_idx
-                save_json(STATE_FILE, state)
-
-                if is_video:
-                    report_data["videos"] = report_data.get("videos", 0) + 1
-                else:
-                    report_data["images"] = report_data.get("images", 0) + 1
-
-                boards_dict = report_data.get("boards", {})
-                boards_dict[board_name] = boards_dict.get(board_name, 0) + 1
-                report_data["boards"] = boards_dict
-                
-                save_json(DAILY_REPORT_FILE, report_data)
-
-                posted = True
-                break
-
-        if posted:
+        if posted_successfully:
             break
 
-    # ==========================================
-    # 4. DYNAMIC DAILY REPORT (8:00 PM IST Trigger)
-    # ==========================================
-    # Convert UTC time directly to IST (UTC + 5:30)
-    utc_now = datetime.now(timezone.utc)
-    ist_now = utc_now + timedelta(hours=5, minutes=30)
-    
-    today_str = ist_now.strftime("%Y-%m-%d")
-    last_report_date = report_data.get("last_report_date", "")
+    # State & Posted Pins సేవ్ చేయడం
+    save_json(STATE_FILE, state)
+    save_json(POSTED_PINS_FILE, list(posted_pins))
 
-    # IST టైమ్ ప్రకారం రాత్రి 8 గంటలు (20:00) దాటితే మరియు ఈరోజుకి ఇంకా రిపోర్ట్ పంపకపోతే...
-    if ist_now.hour >= 20 and last_report_date != today_str:
-        total_posts = report_data.get("images", 0) + report_data.get("videos", 0)
-        
-        if total_posts > 0:
-            summary_text = (
-                f"📊 <b>Daily Pinterest Analytics Summary Report</b>\n"
-                f"📅 Date: {today_str}\n\n"
-                f"🖼 Total Images Posted: <b>{report_data.get('images', 0)}</b>\n"
-                f"🎥 Total Videos Posted: <b>{report_data.get('videos', 0)}</b>\n\n"
-                f"<b>Board Details:</b>\n"
-            )
-            for b_name, count in report_data.get("boards", {}).items():
-                summary_text += f"• {b_name}: {count} post(s)\n"
+    # Daily Analytics Report (IST ప్రకారం రాత్రి 8 PM దాటాక)
+    ist = pytz.timezone('Asia/Kolkata')
+    now_ist = datetime.now(ist)
+    today_str = now_ist.strftime("%Y-%m-%d")
 
-            send_telegram_message(ADMIN_CHAT_ID, summary_text)
-            log("📈 Daily Analytics Report sent to Admin!")
-
-        # ఈరోజు రిపోర్ట్ పంపినట్లు మార్క్ చేసి, కౌంటర్‌ని ఆటోమేటిక్‌గా రీసెట్ చేయడం
-        new_report_data = {
-            "images": 0, 
-            "videos": 0, 
-            "boards": {}, 
-            "last_report_date": today_str
-        }
-        save_json(DAILY_REPORT_FILE, new_report_data)
+    if now_ist.hour >= 20 and state.get("last_report_date") != today_str:
+        report_msg = (
+            f"📊 *Daily Analytics Summary ({today_str})*\n\n"
+            f"✅ Total Unique Pins Posted: {len(posted_pins)}\n"
+            f"🔄 Next Board Index: {state.get('board_index')}\n"
+            f"🚀 Bot Status: Working smoothly without duplicate board repetition!"
+        )
+        send_admin_report(report_msg)
+        state["last_report_date"] = today_str
+        save_json(STATE_FILE, state)
 
 if __name__ == "__main__":
     main()
