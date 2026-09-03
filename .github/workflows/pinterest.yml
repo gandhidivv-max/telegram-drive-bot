@@ -2,9 +2,6 @@ name: Pinterest Bot Runner
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 * * * *' # ప్రతీ గంటకు ఒకసారి ఆటోమేటిక్‌గా రన్ అవ్వడానికి
-
 jobs:
   run-bot:
     runs-on: ubuntu-latest
