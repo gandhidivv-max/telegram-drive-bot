@@ -7,14 +7,14 @@ import requests
 from datetime import datetime
 import pytz
 
-# Detailed Logging
+# Logging Setup
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[logging.StreamHandler()]
 )
 
-# Existing GitHub Secrets
+# Fetch Basic Secrets
 PINTEREST_APP_ID = os.getenv("PINTEREST_APP_ID")
 PINTEREST_APP_SECRET = os.getenv("PINTEREST_APP_SECRET")
 PINTEREST_REFRESH_TOKEN = os.getenv("PINTEREST_REFRESH_TOKEN")
@@ -24,15 +24,6 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
-
-# -------------------------------------------------------------
-# బోర్డ్ ఐడీలు మరియు పేర్లు నేరుగా ఇక్కడే ఇవ్వండి (Secrets అవసరం లేదు)
-# -------------------------------------------------------------
-BOARD_MAPPING = {
-    "123456789012345678": "Special",
-    "987654321098765432": "Wallpapers"
-    # మీ మరిన్ని బోర్డులను ఇక్కడ యాడ్ చేసుకోవచ్చు
-}
 
 STATE_FILE = "state.json"
 CONTROL_FILE = "bot_control.json"
@@ -141,9 +132,32 @@ def get_pinterest_access_token():
         return res.json().get("access_token")
     
     err_msg = res.text if res else "No Response"
-    logging.critical(f"Pinterest Refresh Token Failure: {err_msg}")
+    logging.critical(f"Pinterest Token Error: {err_msg}")
     send_admin_report(f"🚨 **CRITICAL ALERT**: Pinterest Token Error!\n`{err_msg}`")
     return None
+
+def get_all_user_boards(access_token):
+    """
+    Pinterest API ద్వారా యూజర్ అకౌంట్‌లో ఉన్న అన్ని బోర్డులను ఆటోమేటిక్‌గా ఫెచ్ చేస్తుంది
+    """
+    url = "https://api.pinterest.com/v5/boards"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    res = api_request_with_backoff(url, headers=headers)
+    
+    boards_dict = {}
+    if res and res.ok:
+        items = res.json().get("items", [])
+        for item in items:
+            b_id = str(item.get("id"))
+            b_name = str(item.get("name"))
+            boards_dict[b_id] = b_name
+        logging.info(f"Auto-scanned {len(boards_dict)} boards from Pinterest account.")
+    else:
+        err_msg = res.text if res else "No Response"
+        logging.error(f"Failed to fetch boards automatically: {err_msg}")
+        send_admin_report(f"❌ **Auto Board Fetch Failed**: `{err_msg}`")
+        
+    return boards_dict
 
 def get_board_sections(access_token, board_id):
     url = f"https://api.pinterest.com/v5/boards/{board_id}/sections"
@@ -163,7 +177,6 @@ def get_pins_from_target(access_token, target_id, is_section=False):
     res = api_request_with_backoff(url, headers=headers)
     if res and res.ok:
         return res.json().get("items", [])
-    logging.error(f"Failed to fetch pins for ID {target_id}: {res.text if res else 'No Response'}")
     return []
 
 def extract_media_info(pin):
@@ -222,24 +235,27 @@ def post_media_to_telegram(media_url, is_video, is_special_board, board_name):
     send_admin_report(f"❌ **Telegram Post Error**:\n`{err_text}`")
     return False
 
-# Main Execution Process
+# Main Process
 def main():
-    logging.info("Starting Pinterest Engine Process...")
+    logging.info("Starting Auto-Board Scan Pinterest Engine...")
 
     if not check_telegram_commands():
-        logging.info("Bot is currently PAUSED. Exiting.")
+        logging.info("Bot is PAUSED. Exiting.")
         return
 
     access_token = get_pinterest_access_token()
     if not access_token:
         return
 
-    # Sort Boards A to Z by Name
-    sorted_board_ids = sorted(BOARD_MAPPING.keys(), key=lambda b_id: str(BOARD_MAPPING[b_id]).lower())
-    
-    if not sorted_board_ids:
-        logging.warning("No board mappings defined in main.py.")
+    # బోర్డులను ఆటోమేటిక్‌గా తెచ్చుకోవడం
+    board_mapping = get_all_user_boards(access_token)
+
+    if not board_mapping:
+        logging.warning("No boards fetched from Pinterest account.")
         return
+
+    # Sort Boards A to Z by Name
+    sorted_board_ids = sorted(board_mapping.keys(), key=lambda b_id: str(board_mapping[b_id]).lower())
 
     state = load_json(STATE_FILE, {"board_index": 0, "last_report_date": ""})
     stats = load_json(STATS_FILE, {})
@@ -252,7 +268,7 @@ def main():
     for i in range(total_boards):
         curr_index = (start_index + i) % total_boards
         board_id = sorted_board_ids[curr_index]
-        board_name = str(BOARD_MAPPING[board_id])
+        board_name = str(board_mapping[board_id])
 
         is_special_board = (board_name.strip().lower() == "special")
         posted_ids = load_posted_ids(board_id)
@@ -333,4 +349,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-                
+    
