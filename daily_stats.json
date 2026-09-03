@@ -125,6 +125,10 @@
         "images expressions": {
             "images": 1,
             "videos": 0
+        },
+        "incst": {
+            "images": 1,
+            "videos": 0
         }
     }
 }
