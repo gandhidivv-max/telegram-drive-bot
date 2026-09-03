@@ -47,11 +47,13 @@ def get_pinterest_access_token():
     return None
 
 def get_user_boards(access_token):
+    """Pinterest బోర్డుల IDలు మరియు వాటి పేర్లను తెచ్చుకునే ఫంక్షన్"""
     url = "https://api.pinterest.com/v5/boards"
     headers = {"Authorization": f"Bearer {access_token}"}
     res = requests.get(url, headers=headers)
     if res.ok:
-        return [board["id"] for board in res.json().get("items", [])]
+        items = res.json().get("items", [])
+        return [{"id": board["id"], "name": board.get("name", "Pinterest")} for board in items]
     return []
 
 def get_pins_from_board(access_token, board_id):
@@ -62,13 +64,29 @@ def get_pins_from_board(access_token, board_id):
         return res.json().get("items", [])
     return []
 
-def send_telegram_photo(image_url, caption):
-    """Main Channel కి మాత్రమే ఫోటో పోస్ట్ చేసే ఫంక్షన్"""
+def send_telegram_photo(image_url, caption, board_name):
+    """
+    Main Channel కి ఫోటో మరియు Inline Keyboard Button పంపే ఫంక్షన్.
+    Inline Button ఛానెల్‌లో మాత్రమే కనిపిస్తుంది, గ్రూప్‌లోకి వెళ్లేసరికి టెలిగ్రామ్ దానిని తీసివేస్తుంది.
+    """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": f"📌 Board: {board_name}",
+                    "callback_data": "ignore_click"
+                }
+            ]
+        ]
+    }
+
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "photo": image_url,
-        "caption": caption
+        "caption": caption,
+        "reply_markup": json.dumps(reply_markup)
     }
     res = requests.post(url, json=payload)
     return res.ok
@@ -113,7 +131,10 @@ def main():
     # Round-Robin Traversal
     for i in range(total_boards):
         current_board_index = (start_index + i) % total_boards
-        board_id = boards[current_board_index]
+        board_info = boards[current_board_index]
+        board_id = board_info["id"]
+        board_name = board_info["name"]
+
         pins = get_pins_from_board(access_token, board_id)
 
         for pin in pins:
@@ -127,8 +148,10 @@ def main():
 
             if image_url:
                 caption = pin.get("title") or pin.get("description") or ""
-                if send_telegram_photo(image_url, caption):
-                    print(f"Posted Pin ID {pin_id} from Board Index {current_board_index}")
+                
+                # Inline Button తో Telegram Channel కి పంపడం
+                if send_telegram_photo(image_url, caption, board_name):
+                    print(f"Posted Pin ID {pin_id} from Board: {board_name}")
                     posted_pins.add(pin_id)
                     
                     # Next Board Index Update
@@ -161,4 +184,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
+                      
