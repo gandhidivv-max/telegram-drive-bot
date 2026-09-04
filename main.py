@@ -168,10 +168,13 @@ def get_board_sections(access_token, board_id):
     return []
 
 def get_pins_from_target(access_token, target_id, is_section=False):
+    # API ద్వారా media, videos వివరాలు రావడం కోసం fields_query జోడించబడింది
+    fields_query = "?pin_filter=exclude_native&fields=id,title,description,link,media"
+    
     if is_section:
-        url = f"https://api.pinterest.com/v5/boards/sections/{target_id}/pins"
+        url = f"https://api.pinterest.com/v5/boards/sections/{target_id}/pins{fields_query}"
     else:
-        url = f"https://api.pinterest.com/v5/boards/{target_id}/pins"
+        url = f"https://api.pinterest.com/v5/boards/{target_id}/pins{fields_query}"
         
     headers = {"Authorization": f"Bearer {access_token}"}
     res = api_request_with_backoff(url, headers=headers)
@@ -185,7 +188,6 @@ def extract_media_info(pin):
     
     # 1. Video extraction logic
     if media_type in ["video", "multiple_videos"]:
-        # Direct video_list check
         video_list = media.get("videos", {}).get("video_list", {})
         if not video_list and "video" in media:
             video_list = media.get("video", {}).get("video_list", {})
@@ -194,7 +196,6 @@ def extract_media_info(pin):
             if v_key in video_list and "url" in video_list[v_key]:
                 return video_list[v_key]["url"], True
         
-        # If any other video resolution exists
         for v_obj in video_list.values():
             if isinstance(v_obj, dict) and "url" in v_obj:
                 return v_obj["url"], True
