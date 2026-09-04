@@ -203,6 +203,10 @@
         "Hot face": {
             "images": 0,
             "videos": 1
+        },
+        "images expressions": {
+            "images": 1,
+            "videos": 0
         }
     }
 }
