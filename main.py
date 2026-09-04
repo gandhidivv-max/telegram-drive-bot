@@ -137,9 +137,6 @@ def get_pinterest_access_token():
     return None
 
 def get_all_user_boards(access_token):
-    """
-    Pinterest API ద్వారా యూజర్ అకౌంట్‌లో ఉన్న అన్ని బోర్డులను ఆటోమేటిక్‌గా ఫెచ్ చేస్తుంది
-    """
     url = "https://api.pinterest.com/v5/boards"
     headers = {"Authorization": f"Bearer {access_token}"}
     res = api_request_with_backoff(url, headers=headers)
@@ -168,7 +165,6 @@ def get_board_sections(access_token, board_id):
     return []
 
 def get_pins_from_target(access_token, target_id, is_section=False):
-    # API ద్వారా media వివరాలు రావడం కోసం fields_query జోడించబడింది
     fields_query = "?fields=id,title,description,link,media"
     
     if is_section:
@@ -182,44 +178,31 @@ def get_pins_from_target(access_token, target_id, is_section=False):
         return res.json().get("items", [])
     return []
 
-def extract_media_info(pin):
+def extract_video_info_only(pin):
     media = pin.get("media", {})
     media_type = media.get("media_type", "")
     
-    # 1. Video Check (Explicit video_list and fallback URL search)
+    # 1. Video List Check
     videos_dict = media.get("videos", {}) or media.get("video", {})
     video_list = videos_dict.get("video_list", {}) if isinstance(videos_dict, dict) else {}
 
     if video_list or media_type in ["video", "multiple_videos"]:
-        # Resolution order
         for v_key in ["V_720P", "V_EXP4", "V_EXP3", "V_480P", "V_360P"]:
             if v_key in video_list and isinstance(video_list[v_key], dict) and "url" in video_list[v_key]:
-                return video_list[v_key]["url"], True
+                return video_list[v_key]["url"]
 
         for v_obj in video_list.values():
             if isinstance(v_obj, dict) and "url" in v_obj:
-                return v_obj["url"], True
+                return v_obj["url"]
 
-    # Check for direct mp4 links in media
+    # Direct Video URL Fallback
     if "video_url" in media and media["video_url"]:
-        return media["video_url"], True
+        return media["video_url"]
 
-    # 2. Image Fallback
-    images = media.get("images", {})
-    if not images and "media" in pin:
-        images = pin.get("media", {}).get("images", {})
-        
-    for i_key in ["originals", "1200x", "600x", "400x300"]:
-        if i_key in images and "url" in images[i_key]:
-            return images[i_key]["url"], False
-            
-    if "image_large_url" in pin:
-        return pin["image_large_url"], False
+    return None
 
-    return None, False
-
-def post_media_to_telegram(media_url, is_video, is_special_board, board_name):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/" + ("sendVideo" if is_video else "sendPhoto")
+def post_media_to_telegram(media_url, is_special_board, board_name):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
     
     reply_markup = {
         "inline_keyboard": [
@@ -234,7 +217,7 @@ def post_media_to_telegram(media_url, is_video, is_special_board, board_name):
 
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        ("video" if is_video else "photo"): media_url,
+        "video": media_url,
         "protect_content": True,
         "reply_markup": json.dumps(reply_markup)
     }
@@ -247,13 +230,13 @@ def post_media_to_telegram(media_url, is_video, is_special_board, board_name):
         return True
     
     err_text = res.text if res else "No Response"
-    logging.error(f"Telegram Posting Failed: {err_text}")
+    logging.error(f"Telegram Video Posting Failed: {err_text}")
     send_admin_report(f"❌ **Telegram Post Error**:\n`{err_text}`")
     return False
 
 # Main Process
 def main():
-    logging.info("Starting Auto-Board Scan Pinterest Engine...")
+    logging.info("Starting VIDEO-ONLY Scan Mode...")
 
     if not check_telegram_commands():
         logging.info("Bot is PAUSED. Exiting.")
@@ -263,14 +246,12 @@ def main():
     if not access_token:
         return
 
-    # బోర్డులను ఆటోమేటిక్‌గా తెచ్చుకోవడం
     board_mapping = get_all_user_boards(access_token)
 
     if not board_mapping:
         logging.warning("No boards fetched from Pinterest account.")
         return
 
-    # Sort Boards A to Z by Name
     sorted_board_ids = sorted(board_mapping.keys(), key=lambda b_id: str(board_mapping[b_id]).lower())
 
     state = load_json(STATE_FILE, {"board_index": 0, "last_report_date": ""})
@@ -304,13 +285,17 @@ def main():
         
         for selected_pin in unposted:
             pin_id = str(selected_pin.get("id"))
-            media_url, is_video = extract_media_info(selected_pin)
+            
+            # కేవలం వీడియోల కోసం చెక్ చేస్తాం (ఇమేజ్‌లను స్కిప్ చేస్తాం)
+            video_url = extract_video_info_only(selected_pin)
 
-            if not media_url:
+            if not video_url:
                 continue
 
-            if post_media_to_telegram(media_url, is_video, is_special_board, board_name):
-                logging.info(f"Successfully posted Pin {pin_id} from Board '{board_name}'")
+            logging.info(f"🎥 Video found in Pin {pin_id}! Attempting to post...")
+
+            if post_media_to_telegram(video_url, is_special_board, board_name):
+                logging.info(f"Successfully posted Video Pin {pin_id} from Board '{board_name}'")
                 
                 append_posted_id(board_id, pin_id)
                 state["board_index"] = (curr_index + 1) % total_boards
@@ -322,47 +307,18 @@ def main():
                 if board_name not in stats[today]:
                     stats[today][board_name] = {"images": 0, "videos": 0}
 
-                if is_video:
-                    stats[today][board_name]["videos"] += 1
-                else:
-                    stats[today][board_name]["images"] += 1
-
+                stats[today][board_name]["videos"] += 1
                 break
 
         if posted_successfully:
             break
 
     if not posted_successfully:
-        logging.info("No media posted in this run.")
+        logging.info("No VIDEO media posted in this run.")
 
     save_json(STATE_FILE, state)
     save_json(STATS_FILE, stats)
 
-    # Daily Report at 8 PM IST
-    ist = pytz.timezone('Asia/Kolkata')
-    now_ist = datetime.now(ist)
-    today_str = now_ist.strftime("%Y-%m-%d")
-
-    if now_ist.hour >= 20 and state.get("last_report_date") != today_str:
-        today_data = stats.get(today_str, {})
-        report_msg = f"📊 *Daily Analytics Summary Report ({today_str})*\n\n"
-        
-        total_img, total_vid = 0, 0
-        if today_data:
-            for b_name, counts in today_data.items():
-                img, vid = counts["images"], counts["videos"]
-                total_img += img
-                total_vid += vid
-                report_msg += f"🔹 *{b_name}*: {img} Images, {vid} Videos\n"
-        else:
-            report_msg += "No posts published today.\n"
-
-        report_msg += f"\n✅ *Total Summary*: {total_img} Images | {total_vid} Videos"
-        
-        send_admin_report(report_msg)
-        state["last_report_date"] = today_str
-        save_json(STATE_FILE, state)
-
 if __name__ == "__main__":
     main()
-        
+            
