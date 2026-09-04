@@ -182,7 +182,6 @@ def scrape_video_url_from_web(pin_id):
         }
         res = requests.get(web_url, headers=headers, timeout=10)
         if res.ok:
-            # Match MP4 links inside script tags
             matches = re.findall(r'https://v1\.pinimg\.com/videos/[^\s"\'\\]+\.mp4', res.text)
             if not matches:
                 matches = re.findall(r'https://[^\s"\'\\]+\.mp4', res.text)
@@ -193,7 +192,7 @@ def scrape_video_url_from_web(pin_id):
         logging.error(f"Scraping error for pin {pin_id}: {e}")
     return None
 
-def extract_media_info_hybrid(pin_id, pin_details):
+def extract_only_video_url(pin_id, pin_details):
     media = pin_details.get("media", {})
     
     # 1. API direct video check
@@ -203,27 +202,22 @@ def extract_media_info_hybrid(pin_id, pin_details):
     if video_list:
         for v_key in ["V_720P", "V_EXP4", "V_EXP3", "V_480P", "V_360P"]:
             if v_key in video_list and isinstance(video_list[v_key], dict) and "url" in video_list[v_key]:
-                return video_list[v_key]["url"], True
+                return video_list[v_key]["url"]
 
         for v_obj in video_list.values():
             if isinstance(v_obj, dict) and "url" in v_obj:
-                return v_obj["url"], True
+                return v_obj["url"]
 
     # 2. Web Scraping Bypass for Video
     scraped_video_url = scrape_video_url_from_web(pin_id)
     if scraped_video_url:
-        return scraped_video_url, True
+        return scraped_video_url
 
-    # 3. Standard Image Fallback
-    images = media.get("images", {})
-    for i_key in ["originals", "1200x", "600x", "400x300"]:
-        if i_key in images and isinstance(images[i_key], dict) and "url" in images[i_key]:
-            return images[i_key]["url"], False
+    # No video found -> return None
+    return None
 
-    return None, False
-
-def post_media_to_telegram(media_url, is_video, is_special_board, board_name):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/" + ("sendVideo" if is_video else "sendPhoto")
+def post_video_to_telegram(video_url, is_special_board, board_name):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
     
     reply_markup = {
         "inline_keyboard": [[{"text": f"📌 Board: {board_name}", "callback_data": "ignore_click"}]]
@@ -231,7 +225,7 @@ def post_media_to_telegram(media_url, is_video, is_special_board, board_name):
 
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        ("video" if is_video else "photo"): media_url,
+        "video": video_url,
         "protect_content": True,
         "reply_markup": json.dumps(reply_markup)
     }
@@ -244,13 +238,13 @@ def post_media_to_telegram(media_url, is_video, is_special_board, board_name):
         return True
     
     err_text = res.text if res else "No Response"
-    logging.error(f"Telegram Posting Failed: {err_text}")
+    logging.error(f"Telegram Video Posting Failed: {err_text}")
     send_admin_report(f"❌ **Telegram Post Error**:\n`{err_text}`")
     return False
 
 # Main Process
 def main():
-    logging.info("Starting Hybrid Extraction Engine (API + Web Scraper Bypass)...")
+    logging.info("Starting Video-ONLY Extraction Engine...")
 
     if not check_telegram_commands():
         logging.info("Bot is PAUSED. Exiting.")
@@ -297,14 +291,15 @@ def main():
         for selected_pin in unposted:
             pin_id = str(selected_pin.get("id"))
             
-            # Hybrid extraction
-            media_url, is_video = extract_media_info_hybrid(pin_id, selected_pin)
+            # Strict Video-Only Check
+            video_url = extract_only_video_url(pin_id, selected_pin)
 
-            if not media_url:
+            if not video_url:
+                logging.info(f"Pin {pin_id} is NOT a video or stream link missing. Skipping Image...")
                 continue
 
-            if post_media_to_telegram(media_url, is_video, is_special_board, board_name):
-                logging.info(f"Successfully posted {'VIDEO' if is_video else 'IMAGE'} Pin {pin_id} from Board '{board_name}'")
+            if post_video_to_telegram(video_url, is_special_board, board_name):
+                logging.info(f"Successfully posted VIDEO Pin {pin_id} from Board '{board_name}'")
                 
                 append_posted_id(board_id, pin_id)
                 state["board_index"] = (curr_index + 1) % total_boards
@@ -316,11 +311,7 @@ def main():
                 if board_name not in stats[today]:
                     stats[today][board_name] = {"images": 0, "videos": 0}
 
-                if is_video:
-                    stats[today][board_name]["videos"] += 1
-                else:
-                    stats[today][board_name]["images"] += 1
-
+                stats[today][board_name]["videos"] += 1
                 break
 
         if posted_successfully:
@@ -338,17 +329,16 @@ def main():
         today_data = stats.get(today_str, {})
         report_msg = f"📊 *Daily Analytics Summary Report ({today_str})*\n\n"
         
-        total_img, total_vid = 0, 0
+        total_vid = 0
         if today_data:
             for b_name, counts in today_data.items():
-                img, vid = counts["images"], counts["videos"]
-                total_img += img
+                vid = counts.get("videos", 0)
                 total_vid += vid
-                report_msg += f"🔹 *{b_name}*: {img} Images, {vid} Videos\n"
+                report_msg += f"🔹 *{b_name}*: {vid} Videos\n"
         else:
             report_msg += "No posts published today.\n"
 
-        report_msg += f"\n✅ *Total Summary*: {total_img} Images | {total_vid} Videos"
+        report_msg += f"\n✅ *Total Summary*: {total_vid} Videos"
         
         send_admin_report(report_msg)
         state["last_report_date"] = today_str
