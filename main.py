@@ -4,6 +4,7 @@ import time
 import random
 import logging
 import requests
+import re
 from datetime import datetime
 import pytz
 
@@ -172,25 +173,34 @@ def get_pins_from_target(access_token, target_id, is_section=False):
         return res.json().get("items", [])
     return []
 
-def get_single_pin_details(access_token, pin_id):
-    url = f"https://api.pinterest.com/v5/pins/{pin_id}"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    res = api_request_with_backoff(url, headers=headers)
-    if res and res.ok:
-        return res.json()
-    return {}
+def scrape_video_url_from_web(pin_id):
+    """API వీడియో లింక్ ఇవ్వనప్పుడు వెబ్ పేజీ నుండి మోషన్ MP4 ని ఎక్స్‌ట్రాక్ట్ చేసే ఫాల్‌బ్యాక్ లాజిక్"""
+    try:
+        web_url = f"https://www.pinterest.com/pin/{pin_id}/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+        }
+        res = requests.get(web_url, headers=headers, timeout=10)
+        if res.ok:
+            # Match MP4 links inside script tags
+            matches = re.findall(r'https://v1\.pinimg\.com/videos/[^\s"\'\\]+\.mp4', res.text)
+            if not matches:
+                matches = re.findall(r'https://[^\s"\'\\]+\.mp4', res.text)
+            if matches:
+                logging.info(f"🎉 Web Scraping Bypass SUCCESS for Pin {pin_id}! Video URL found.")
+                return matches[0]
+    except Exception as e:
+        logging.error(f"Scraping error for pin {pin_id}: {e}")
+    return None
 
-def extract_media_info_advanced(pin_details):
+def extract_media_info_hybrid(pin_id, pin_details):
     media = pin_details.get("media", {})
     
-    # Deep String Search for mp4 URLs inside JSON
-    str_media = json.dumps(media)
-    
-    # Check if MP4 or Video Stream exists anywhere inside media object
-    if ".mp4" in str_media or "video_list" in str_media or "videos" in str_media:
-        videos_dict = media.get("videos", {}) or media.get("video", {})
-        video_list = videos_dict.get("video_list", {}) if isinstance(videos_dict, dict) else {}
+    # 1. API direct video check
+    videos_dict = media.get("videos", {}) or media.get("video", {})
+    video_list = videos_dict.get("video_list", {}) if isinstance(videos_dict, dict) else {}
 
+    if video_list:
         for v_key in ["V_720P", "V_EXP4", "V_EXP3", "V_480P", "V_360P"]:
             if v_key in video_list and isinstance(video_list[v_key], dict) and "url" in video_list[v_key]:
                 return video_list[v_key]["url"], True
@@ -199,13 +209,12 @@ def extract_media_info_advanced(pin_details):
             if isinstance(v_obj, dict) and "url" in v_obj:
                 return v_obj["url"], True
 
-        # Fallback to search any mp4 link in string
-        import re
-        mp4_matches = re.findall(r'https?://[^\s"]+\.mp4', str_media)
-        if mp4_matches:
-            return mp4_matches[0], True
+    # 2. Web Scraping Bypass for Video
+    scraped_video_url = scrape_video_url_from_web(pin_id)
+    if scraped_video_url:
+        return scraped_video_url, True
 
-    # Regular Image Fallback
+    # 3. Standard Image Fallback
     images = media.get("images", {})
     for i_key in ["originals", "1200x", "600x", "400x300"]:
         if i_key in images and isinstance(images[i_key], dict) and "url" in images[i_key]:
@@ -241,7 +250,7 @@ def post_media_to_telegram(media_url, is_video, is_special_board, board_name):
 
 # Main Process
 def main():
-    logging.info("Starting Deep-Media Extraction Engine...")
+    logging.info("Starting Hybrid Extraction Engine (API + Web Scraper Bypass)...")
 
     if not check_telegram_commands():
         logging.info("Bot is PAUSED. Exiting.")
@@ -288,8 +297,8 @@ def main():
         for selected_pin in unposted:
             pin_id = str(selected_pin.get("id"))
             
-            pin_details = get_single_pin_details(access_token, pin_id)
-            media_url, is_video = extract_media_info_advanced(pin_details)
+            # Hybrid extraction
+            media_url, is_video = extract_media_info_hybrid(pin_id, selected_pin)
 
             if not media_url:
                 continue
@@ -320,6 +329,31 @@ def main():
     save_json(STATE_FILE, state)
     save_json(STATS_FILE, stats)
 
+    # Daily Report at 8 PM IST
+    ist = pytz.timezone('Asia/Kolkata')
+    now_ist = datetime.now(ist)
+    today_str = now_ist.strftime("%Y-%m-%d")
+
+    if now_ist.hour >= 20 and state.get("last_report_date") != today_str:
+        today_data = stats.get(today_str, {})
+        report_msg = f"📊 *Daily Analytics Summary Report ({today_str})*\n\n"
+        
+        total_img, total_vid = 0, 0
+        if today_data:
+            for b_name, counts in today_data.items():
+                img, vid = counts["images"], counts["videos"]
+                total_img += img
+                total_vid += vid
+                report_msg += f"🔹 *{b_name}*: {img} Images, {vid} Videos\n"
+        else:
+            report_msg += "No posts published today.\n"
+
+        report_msg += f"\n✅ *Total Summary*: {total_img} Images | {total_vid} Videos"
+        
+        send_admin_report(report_msg)
+        state["last_report_date"] = today_str
+        save_json(STATE_FILE, state)
+
 if __name__ == "__main__":
     main()
-        
+    
