@@ -166,7 +166,13 @@ def get_board_sections(access_token, board_id):
     return []
 
 def get_pins_from_target(access_token, target_id, is_section=False):
-    url = f"https://api.pinterest.com/v5/boards/sections/{target_id}/pins" if is_section else f"https://api.pinterest.com/v5/boards/{target_id}/pins"
+    fields_query = "?pin_filter=exclude_native&fields=id,title,description,link,media"
+    
+    if is_section:
+        url = f"https://api.pinterest.com/v5/boards/sections/{target_id}/pins{fields_query}"
+    else:
+        url = f"https://api.pinterest.com/v5/boards/{target_id}/pins{fields_query}"
+        
     headers = {"Authorization": f"Bearer {access_token}"}
     res = api_request_with_backoff(url, headers=headers)
     if res and res.ok:
@@ -174,7 +180,7 @@ def get_pins_from_target(access_token, target_id, is_section=False):
     return []
 
 def scrape_video_url_from_web(pin_id):
-    """API వీడియో లింక్ ఇవ్వనప్పుడు వెబ్ పేజీ నుండి మోషన్ MP4 ని ఎక్స్‌ట్రాక్ట్ చేసే ఫాల్‌బ్యాక్ లాజిక్"""
+    """API వీడియో లింక్ ఇవ్వనప్పుడు వెబ్ పేజీ నుండి MP4 లింక్‌ను పట్టుకునే బైపాస్ లాజిక్"""
     try:
         web_url = f"https://www.pinterest.com/pin/{pin_id}/"
         headers = {
@@ -192,40 +198,61 @@ def scrape_video_url_from_web(pin_id):
         logging.error(f"Scraping error for pin {pin_id}: {e}")
     return None
 
-def extract_only_video_url(pin_id, pin_details):
-    media = pin_details.get("media", {})
+def extract_media_info(pin):
+    pin_id = str(pin.get("id"))
+    media = pin.get("media", {})
+    media_type = media.get("media_type", "")
     
-    # 1. API direct video check
-    videos_dict = media.get("videos", {}) or media.get("video", {})
-    video_list = videos_dict.get("video_list", {}) if isinstance(videos_dict, dict) else {}
+    # 1. API Direct Video check
+    if media_type in ["video", "multiple_videos"]:
+        video_list = media.get("videos", {}).get("video_list", {})
+        if not video_list and "video" in media:
+            video_list = media.get("video", {}).get("video_list", {})
 
-    if video_list:
         for v_key in ["V_720P", "V_EXP4", "V_EXP3", "V_480P", "V_360P"]:
-            if v_key in video_list and isinstance(video_list[v_key], dict) and "url" in video_list[v_key]:
-                return video_list[v_key]["url"]
-
+            if v_key in video_list and "url" in video_list[v_key]:
+                return video_list[v_key]["url"], True
+        
         for v_obj in video_list.values():
             if isinstance(v_obj, dict) and "url" in v_obj:
-                return v_obj["url"]
+                return v_obj["url"], True
 
-    # 2. Web Scraping Bypass for Video
+    # 2. Web Scraping Bypass Check (API కేవలం Image అని చెప్పినా పేజీలో MP4 ఉందేమో వెతుకుతుంది)
     scraped_video_url = scrape_video_url_from_web(pin_id)
     if scraped_video_url:
-        return scraped_video_url
+        return scraped_video_url, True
 
-    # No video found -> return None
-    return None
+    # 3. Standard Image Fallback (వీడియో లేకపోతే ఇమేజ్ పోస్ట్ అవుతుంది)
+    images = media.get("images", {})
+    if not images and "media" in pin:
+        images = pin.get("media", {}).get("images", {})
+        
+    for i_key in ["originals", "1200x", "600x", "400x300"]:
+        if i_key in images and "url" in images[i_key]:
+            return images[i_key]["url"], False
+            
+    if "image_large_url" in pin:
+        return pin["image_large_url"], False
 
-def post_video_to_telegram(video_url, is_special_board, board_name):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
+    return None, False
+
+def post_media_to_telegram(media_url, is_video, is_special_board, board_name):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/" + ("sendVideo" if is_video else "sendPhoto")
     
     reply_markup = {
-        "inline_keyboard": [[{"text": f"📌 Board: {board_name}", "callback_data": "ignore_click"}]]
+        "inline_keyboard": [
+            [
+                {
+                    "text": f"📌 Board: {board_name}",
+                    "callback_data": "ignore_click"
+                }
+            ]
+        ]
     }
 
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "video": video_url,
+        ("video" if is_video else "photo"): media_url,
         "protect_content": True,
         "reply_markup": json.dumps(reply_markup)
     }
@@ -238,13 +265,13 @@ def post_video_to_telegram(video_url, is_special_board, board_name):
         return True
     
     err_text = res.text if res else "No Response"
-    logging.error(f"Telegram Video Posting Failed: {err_text}")
+    logging.error(f"Telegram Posting Failed: {err_text}")
     send_admin_report(f"❌ **Telegram Post Error**:\n`{err_text}`")
     return False
 
 # Main Process
 def main():
-    logging.info("Starting Video-ONLY Extraction Engine...")
+    logging.info("Starting Auto-Board Scan Pinterest Engine with Web Scraping Bypass...")
 
     if not check_telegram_commands():
         logging.info("Bot is PAUSED. Exiting.")
@@ -255,9 +282,12 @@ def main():
         return
 
     board_mapping = get_all_user_boards(access_token)
+
     if not board_mapping:
+        logging.warning("No boards fetched from Pinterest account.")
         return
 
+    # Sort Boards A to Z by Name
     sorted_board_ids = sorted(board_mapping.keys(), key=lambda b_id: str(board_mapping[b_id]).lower())
 
     state = load_json(STATE_FILE, {"board_index": 0, "last_report_date": ""})
@@ -284,22 +314,20 @@ def main():
         unposted = [p for p in all_pins if str(p.get("id")) not in posted_ids]
 
         if not unposted:
+            logging.info(f"Board '{board_name}' ({board_id}) has no new items. Skipping...")
             continue
 
         random.shuffle(unposted)
         
         for selected_pin in unposted:
             pin_id = str(selected_pin.get("id"))
-            
-            # Strict Video-Only Check
-            video_url = extract_only_video_url(pin_id, selected_pin)
+            media_url, is_video = extract_media_info(selected_pin)
 
-            if not video_url:
-                logging.info(f"Pin {pin_id} is NOT a video or stream link missing. Skipping Image...")
+            if not media_url:
                 continue
 
-            if post_video_to_telegram(video_url, is_special_board, board_name):
-                logging.info(f"Successfully posted VIDEO Pin {pin_id} from Board '{board_name}'")
+            if post_media_to_telegram(media_url, is_video, is_special_board, board_name):
+                logging.info(f"Successfully posted {'VIDEO' if is_video else 'IMAGE'} Pin {pin_id} from Board '{board_name}'")
                 
                 append_posted_id(board_id, pin_id)
                 state["board_index"] = (curr_index + 1) % total_boards
@@ -311,11 +339,18 @@ def main():
                 if board_name not in stats[today]:
                     stats[today][board_name] = {"images": 0, "videos": 0}
 
-                stats[today][board_name]["videos"] += 1
+                if is_video:
+                    stats[today][board_name]["videos"] += 1
+                else:
+                    stats[today][board_name]["images"] += 1
+
                 break
 
         if posted_successfully:
             break
+
+    if not posted_successfully:
+        logging.info("No media posted in this run.")
 
     save_json(STATE_FILE, state)
     save_json(STATS_FILE, stats)
@@ -329,16 +364,17 @@ def main():
         today_data = stats.get(today_str, {})
         report_msg = f"📊 *Daily Analytics Summary Report ({today_str})*\n\n"
         
-        total_vid = 0
+        total_img, total_vid = 0, 0
         if today_data:
             for b_name, counts in today_data.items():
-                vid = counts.get("videos", 0)
+                img, vid = counts["images"], counts["videos"]
+                total_img += img
                 total_vid += vid
-                report_msg += f"🔹 *{b_name}*: {vid} Videos\n"
+                report_msg += f"🔹 *{b_name}*: {img} Images, {vid} Videos\n"
         else:
             report_msg += "No posts published today.\n"
 
-        report_msg += f"\n✅ *Total Summary*: {total_vid} Videos"
+        report_msg += f"\n✅ *Total Summary*: {total_img} Images | {total_vid} Videos"
         
         send_admin_report(report_msg)
         state["last_report_date"] = today_str
@@ -346,4 +382,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
