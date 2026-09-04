@@ -327,7 +327,8 @@ def main():
                 continue
 
             if post_media_to_telegram(media_url, is_video, is_special_board, board_name):
-                logging.info(f"Successfully posted {'VIDEO' if is_video else 'IMAGE'} Pin {pin_id} from Board '{board_name}'")
+                # 🛠️ లాగ్స్‌లో Board ID కూడా స్పష్టంగా కనిపిస్తుంది
+                logging.info(f"Successfully posted {'VIDEO' if is_video else 'IMAGE'} Pin {pin_id} from Board '{board_name}' ({board_id})")
                 
                 append_posted_id(board_id, pin_id)
                 state["board_index"] = (curr_index + 1) % total_boards
@@ -382,3 +383,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+                
