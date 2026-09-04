@@ -199,6 +199,10 @@
         "Fake actress": {
             "images": 0,
             "videos": 1
+        },
+        "Hot face": {
+            "images": 0,
+            "videos": 1
         }
     }
 }
