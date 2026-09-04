@@ -29,6 +29,7 @@ STATE_FILE = "state.json"
 CONTROL_FILE = "bot_control.json"
 STATS_FILE = "daily_stats.json"
 
+# Helper Functions
 def load_json(filepath, default):
     if os.path.exists(filepath):
         try:
@@ -91,6 +92,33 @@ def api_request_with_backoff(url, method="GET", headers=None, data=None, json_pa
             delay *= 2
     return None
 
+def check_telegram_commands():
+    if not ADMIN_BOT_TOKEN:
+        return True
+    
+    url = f"https://api.telegram.org/bot{ADMIN_BOT_TOKEN}/getUpdates"
+    res = api_request_with_backoff(url)
+    control = load_json(CONTROL_FILE, {"is_paused": False, "last_update_id": 0})
+    
+    if res and res.ok:
+        updates = res.json().get("result", [])
+        for update in updates:
+            control["last_update_id"] = update["update_id"]
+            message = update.get("message", {})
+            text = message.get("text", "").strip().lower()
+            
+            if text == "/pause":
+                control["is_paused"] = True
+                send_admin_report("⏸️ Bot execution has been **PAUSED** via Telegram command.")
+            elif text == "/resume":
+                control["is_paused"] = False
+                send_admin_report("▶️ Bot execution has been **RESUMED** via Telegram command.")
+                
+        save_json(CONTROL_FILE, control)
+    
+    return not control.get("is_paused", False)
+
+# Pinterest API
 def get_pinterest_access_token():
     url = "https://api.pinterest.com/v5/oauth/token"
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
@@ -124,11 +152,20 @@ def get_all_user_boards(access_token):
     else:
         err_msg = res.text if res else "No Response"
         logging.error(f"Failed to fetch boards automatically: {err_msg}")
+        send_admin_report(f"❌ **Auto Board Fetch Failed**: `{err_msg}`")
         
     return boards_dict
 
-def get_pins_from_target(access_token, target_id):
-    url = f"https://api.pinterest.com/v5/boards/{target_id}/pins"
+def get_board_sections(access_token, board_id):
+    url = f"https://api.pinterest.com/v5/boards/{board_id}/sections"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    res = api_request_with_backoff(url, headers=headers)
+    if res and res.ok:
+        return [sec["id"] for sec in res.json().get("items", [])]
+    return []
+
+def get_pins_from_target(access_token, target_id, is_section=False):
+    url = f"https://api.pinterest.com/v5/boards/sections/{target_id}/pins" if is_section else f"https://api.pinterest.com/v5/boards/{target_id}/pins"
     headers = {"Authorization": f"Bearer {access_token}"}
     res = api_request_with_backoff(url, headers=headers)
     if res and res.ok:
@@ -136,7 +173,6 @@ def get_pins_from_target(access_token, target_id):
     return []
 
 def get_single_pin_details(access_token, pin_id):
-    """పిన్ యొక్క పూర్తి వివరాలు (Media Video URLs తో సహా) పొందడానికి సపరేట్ API కాల్"""
     url = f"https://api.pinterest.com/v5/pins/{pin_id}"
     headers = {"Authorization": f"Bearer {access_token}"}
     res = api_request_with_backoff(url, headers=headers)
@@ -144,52 +180,72 @@ def get_single_pin_details(access_token, pin_id):
         return res.json()
     return {}
 
-def extract_video_url_from_pin_data(pin_details):
+def extract_media_info_advanced(pin_details):
     media = pin_details.get("media", {})
-    media_type = media.get("media_type", "")
     
-    logging.info(f"Media Type for Pin {pin_details.get('id')}: {media_type}")
+    # Deep String Search for mp4 URLs inside JSON
+    str_media = json.dumps(media)
     
-    videos_dict = media.get("videos", {}) or media.get("video", {})
-    video_list = videos_dict.get("video_list", {}) if isinstance(videos_dict, dict) else {}
+    # Check if MP4 or Video Stream exists anywhere inside media object
+    if ".mp4" in str_media or "video_list" in str_media or "videos" in str_media:
+        videos_dict = media.get("videos", {}) or media.get("video", {})
+        video_list = videos_dict.get("video_list", {}) if isinstance(videos_dict, dict) else {}
 
-    if video_list or media_type in ["video", "multiple_videos"]:
         for v_key in ["V_720P", "V_EXP4", "V_EXP3", "V_480P", "V_360P"]:
             if v_key in video_list and isinstance(video_list[v_key], dict) and "url" in video_list[v_key]:
-                return video_list[v_key]["url"]
+                return video_list[v_key]["url"], True
 
         for v_obj in video_list.values():
             if isinstance(v_obj, dict) and "url" in v_obj:
-                return v_obj["url"]
+                return v_obj["url"], True
 
-    if "video_url" in media and media["video_url"]:
-        return media["video_url"]
+        # Fallback to search any mp4 link in string
+        import re
+        mp4_matches = re.findall(r'https?://[^\s"]+\.mp4', str_media)
+        if mp4_matches:
+            return mp4_matches[0], True
 
-    return None
+    # Regular Image Fallback
+    images = media.get("images", {})
+    for i_key in ["originals", "1200x", "600x", "400x300"]:
+        if i_key in images and isinstance(images[i_key], dict) and "url" in images[i_key]:
+            return images[i_key]["url"], False
 
-def post_video_to_telegram(media_url, board_name):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
+    return None, False
+
+def post_media_to_telegram(media_url, is_video, is_special_board, board_name):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/" + ("sendVideo" if is_video else "sendPhoto")
+    
     reply_markup = {
         "inline_keyboard": [[{"text": f"📌 Board: {board_name}", "callback_data": "ignore_click"}]]
     }
+
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "video": media_url,
+        ("video" if is_video else "photo"): media_url,
         "protect_content": True,
         "reply_markup": json.dumps(reply_markup)
     }
+    
+    if is_special_board:
+        payload["has_spoiler"] = True
 
     res = api_request_with_backoff(url, method="POST", json_payload=payload)
     if res and res.ok:
         return True
     
     err_text = res.text if res else "No Response"
-    logging.error(f"Telegram Video Posting Failed: {err_text}")
+    logging.error(f"Telegram Posting Failed: {err_text}")
     send_admin_report(f"❌ **Telegram Post Error**:\n`{err_text}`")
     return False
 
+# Main Process
 def main():
-    logging.info("Starting Detailed Video Scan Mode...")
+    logging.info("Starting Deep-Media Extraction Engine...")
+
+    if not check_telegram_commands():
+        logging.info("Bot is PAUSED. Exiting.")
+        return
 
     access_token = get_pinterest_access_token()
     if not access_token:
@@ -200,44 +256,70 @@ def main():
         return
 
     sorted_board_ids = sorted(board_mapping.keys(), key=lambda b_id: str(board_mapping[b_id]).lower())
+
+    state = load_json(STATE_FILE, {"board_index": 0, "last_report_date": ""})
+    stats = load_json(STATS_FILE, {})
+
+    total_boards = len(sorted_board_ids)
+    start_index = state.get("board_index", 0) % total_boards
+
     posted_successfully = False
 
-    for board_id in sorted_board_ids:
+    for i in range(total_boards):
+        curr_index = (start_index + i) % total_boards
+        board_id = sorted_board_ids[curr_index]
         board_name = str(board_mapping[board_id])
+
+        is_special_board = (board_name.strip().lower() == "special")
         posted_ids = load_posted_ids(board_id)
 
-        # 1. Get Board Pins
-        all_pins = get_pins_from_target(access_token, board_id)
-        
-        # posted_ids లో లేనివి వెతకడం
+        all_pins = get_pins_from_target(access_token, board_id, is_section=False)
+        sub_sections = get_board_sections(access_token, board_id)
+        for sec_id in sub_sections:
+            all_pins.extend(get_pins_from_target(access_token, sec_id, is_section=True))
+
         unposted = [p for p in all_pins if str(p.get("id")) not in posted_ids]
 
-        logging.info(f"Scanning Board '{board_name}': Found {len(all_pins)} total pins, {len(unposted)} unposted pins.")
+        if not unposted:
+            continue
 
-        for p_summary in unposted:
-            pin_id = str(p_summary.get("id"))
+        random.shuffle(unposted)
+        
+        for selected_pin in unposted:
+            pin_id = str(selected_pin.get("id"))
             
-            # 2. Get Single Pin Full Data (To get accurate media dict)
             pin_details = get_single_pin_details(access_token, pin_id)
-            video_url = extract_video_url_from_pin_data(pin_details)
+            media_url, is_video = extract_media_info_advanced(pin_details)
 
-            if video_url:
-                logging.info(f"🎥 Found Video URL for Pin {pin_id}! Posting to Telegram...")
-                if post_video_to_telegram(video_url, board_name):
-                    append_posted_id(board_id, pin_id)
-                    send_admin_report(f"✅ **Video Posted Successfully!**\nBoard: `{board_name}`\nPin ID: `{pin_id}`")
-                    posted_successfully = True
-                    break
+            if not media_url:
+                continue
+
+            if post_media_to_telegram(media_url, is_video, is_special_board, board_name):
+                logging.info(f"Successfully posted {'VIDEO' if is_video else 'IMAGE'} Pin {pin_id} from Board '{board_name}'")
+                
+                append_posted_id(board_id, pin_id)
+                state["board_index"] = (curr_index + 1) % total_boards
+                posted_successfully = True
+
+                today = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%Y-%m-%d")
+                if today not in stats:
+                    stats[today] = {}
+                if board_name not in stats[today]:
+                    stats[today][board_name] = {"images": 0, "videos": 0}
+
+                if is_video:
+                    stats[today][board_name]["videos"] += 1
                 else:
-                    send_admin_report(f"⚠️ Video found for Pin `{pin_id}`, but Telegram upload failed.")
-            else:
-                logging.info(f"Pin {pin_id} is an IMAGE or has no video stream. Skipping...")
+                    stats[today][board_name]["images"] += 1
+
+                break
 
         if posted_successfully:
             break
 
-    if not posted_successfully:
-        send_admin_report("⚠️ **Test Finished**: Scanned boards, but NO video pins were found among unposted pins.")
+    save_json(STATE_FILE, state)
+    save_json(STATS_FILE, stats)
 
 if __name__ == "__main__":
     main()
+        
