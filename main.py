@@ -183,12 +183,23 @@ def extract_media_info(pin):
     media = pin.get("media", {})
     media_type = media.get("media_type", "")
     
-    if media_type == "video":
+    # 1. Video extraction logic
+    if media_type in ["video", "multiple_videos"]:
+        # Direct video_list check
         video_list = media.get("videos", {}).get("video_list", {})
-        for v_key in ["V_720P", "V_EXP3", "V_480P", "V_360P"]:
+        if not video_list and "video" in media:
+            video_list = media.get("video", {}).get("video_list", {})
+
+        for v_key in ["V_720P", "V_EXP3", "V_EXP4", "V_480P", "V_360P"]:
             if v_key in video_list and "url" in video_list[v_key]:
                 return video_list[v_key]["url"], True
-                
+        
+        # If any other video resolution exists
+        for v_obj in video_list.values():
+            if isinstance(v_obj, dict) and "url" in v_obj:
+                return v_obj["url"], True
+
+    # 2. Image extraction logic (Fallback)
     images = media.get("images", {})
     if not images and "media" in pin:
         images = pin.get("media", {}).get("images", {})
