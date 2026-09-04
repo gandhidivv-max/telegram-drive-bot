@@ -168,8 +168,8 @@ def get_board_sections(access_token, board_id):
     return []
 
 def get_pins_from_target(access_token, target_id, is_section=False):
-    # API ద్వారా media, videos వివరాలు రావడం కోసం fields_query జోడించబడింది
-    fields_query = "?pin_filter=exclude_native&fields=id,title,description,link,media"
+    # API ద్వారా media వివరాలు రావడం కోసం fields_query జోడించబడింది
+    fields_query = "?fields=id,title,description,link,media"
     
     if is_section:
         url = f"https://api.pinterest.com/v5/boards/sections/{target_id}/pins{fields_query}"
@@ -186,21 +186,25 @@ def extract_media_info(pin):
     media = pin.get("media", {})
     media_type = media.get("media_type", "")
     
-    # 1. Video extraction logic
-    if media_type in ["video", "multiple_videos"]:
-        video_list = media.get("videos", {}).get("video_list", {})
-        if not video_list and "video" in media:
-            video_list = media.get("video", {}).get("video_list", {})
+    # 1. Video Check (Explicit video_list and fallback URL search)
+    videos_dict = media.get("videos", {}) or media.get("video", {})
+    video_list = videos_dict.get("video_list", {}) if isinstance(videos_dict, dict) else {}
 
-        for v_key in ["V_720P", "V_EXP3", "V_EXP4", "V_480P", "V_360P"]:
-            if v_key in video_list and "url" in video_list[v_key]:
+    if video_list or media_type in ["video", "multiple_videos"]:
+        # Resolution order
+        for v_key in ["V_720P", "V_EXP4", "V_EXP3", "V_480P", "V_360P"]:
+            if v_key in video_list and isinstance(video_list[v_key], dict) and "url" in video_list[v_key]:
                 return video_list[v_key]["url"], True
-        
+
         for v_obj in video_list.values():
             if isinstance(v_obj, dict) and "url" in v_obj:
                 return v_obj["url"], True
 
-    # 2. Image extraction logic (Fallback)
+    # Check for direct mp4 links in media
+    if "video_url" in media and media["video_url"]:
+        return media["video_url"], True
+
+    # 2. Image Fallback
     images = media.get("images", {})
     if not images and "media" in pin:
         images = pin.get("media", {}).get("images", {})
@@ -361,4 +365,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+        
