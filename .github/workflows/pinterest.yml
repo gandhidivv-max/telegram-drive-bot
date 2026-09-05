@@ -5,7 +5,7 @@ on:
 
 jobs:
   run-bot:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -40,3 +40,4 @@ jobs:
           git pull --rebase origin main || true
           git commit -m "Update state and individual board text files [skip ci]" || exit 0
           git push
+          
