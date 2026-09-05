@@ -385,6 +385,10 @@
         "video hot": {
             "images": 0,
             "videos": 1
+        },
+        "video kiss": {
+            "images": 0,
+            "videos": 1
         }
     }
 }
