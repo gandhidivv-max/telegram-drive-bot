@@ -77,9 +77,9 @@ def api_request_with_backoff(url, method="GET", headers=None, data=None, json_pa
     for attempt in range(max_retries):
         try:
             if method == "GET":
-                res = requests.get(url, headers=headers, params=params, auth=auth, timeout=15)
+                res = requests.get(url, headers=headers, auth=auth, params=params, timeout=15)
             else:
-                res = requests.post(url, headers=headers, data=data, json=json_payload, params=params, auth=auth, timeout=15)
+                res = requests.post(url, headers=headers, data=data, json=json_payload, auth=auth, params=params, timeout=15)
 
             if res is not None and res.status_code == 429:
                 logging.warning(f"Rate limited (429). Retrying in {delay}s...")
@@ -138,11 +138,12 @@ def get_pinterest_access_token():
     return None
 
 def get_all_user_boards(access_token):
-    """అన్ని పేజీలను లూప్ చేస్తూ అకౌంట్‌లో ఉన్న ALL boards ని ఆటోమేటిక్‌గా ఫెచ్ చేసే అప్‌డేటెడ్ లాజిక్"""
+    """పేజినేషన్ లాజిక్‌తో అకౌంట్‌లో ఉన్న బోర్డులన్నింటినీ ఏదీ మిస్ అవ్వకుండా తెచ్చే ఫంక్షన్"""
     url = "https://api.pinterest.com/v5/boards"
     headers = {"Authorization": f"Bearer {access_token}"}
     boards_dict = {}
     bookmark = None
+    page_count = 1
 
     while True:
         params = {"page_size": 25}
@@ -160,7 +161,10 @@ def get_all_user_boards(access_token):
                 boards_dict[b_id] = b_name
 
             bookmark = data.get("bookmark")
-            if not bookmark:
+            logging.info(f"Page {page_count}: Fetched {len(items)} boards. Total so far: {len(boards_dict)}")
+            page_count += 1
+
+            if not bookmark or len(items) == 0:
                 break
         else:
             err_msg = res.text if res else "No Response"
@@ -168,7 +172,7 @@ def get_all_user_boards(access_token):
             send_admin_report(f"❌ **Auto Board Fetch Failed**: `{err_msg}`")
             break
 
-    logging.info(f"Auto-scanned ALL {len(boards_dict)} boards from Pinterest account.")
+    logging.info(f"🎉 Auto-scanned ALL {len(boards_dict)} boards successfully from Pinterest account.")
     return boards_dict
 
 def get_board_sections(access_token, board_id):
@@ -341,7 +345,7 @@ def main():
                 continue
 
             if post_media_to_telegram(media_url, is_video, is_special_board, board_name):
-                # 🛠️ లాగ్స్‌లో Board ID నిరుపమానంగా స్పష్టంగా కనిపిస్తుంది
+                # 🛠️ లాగ్స్‌లో Board ID కూడా స్పష్టంగా కనిపిస్తుంది
                 logging.info(f"Successfully posted {'VIDEO' if is_video else 'IMAGE'} Pin {pin_id} from Board '{board_name}' ({board_id})")
                 
                 append_posted_id(board_id, pin_id)
@@ -397,4 +401,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
+    
