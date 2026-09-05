@@ -279,6 +279,10 @@
         "special": {
             "images": 1,
             "videos": 0
+        },
+        "tamanna": {
+            "images": 0,
+            "videos": 1
         }
     }
 }
