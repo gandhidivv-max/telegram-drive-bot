@@ -267,6 +267,10 @@
         "Saipalvi": {
             "images": 1,
             "videos": 0
+        },
+        "samantha": {
+            "images": 0,
+            "videos": 1
         }
     }
 }
