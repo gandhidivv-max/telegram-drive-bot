@@ -291,6 +291,10 @@
         "Trisha": {
             "images": 1,
             "videos": 0
+        },
+        "video expression": {
+            "images": 0,
+            "videos": 1
         }
     }
 }
