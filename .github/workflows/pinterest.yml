@@ -1,7 +1,8 @@
-Name: Pinterest Bot Runner
+name: Pinterest Auto Schedule
 
 on:
   workflow_dispatch:
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -28,7 +29,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ADMIN_BOT_TOKEN: ${{ secrets.ADMIN_BOT_TOKEN }}
           ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
-          # JSON format mapping: '{"12345678": "Special", "87654321": "Wallpapers"}'
           BOARD_MAPPING_JSON: ${{ secrets.BOARD_MAPPING_JSON }}
         run: python main.py
 
@@ -40,4 +40,3 @@ jobs:
           git pull --rebase origin main || true
           git commit -m "Update state and individual board text files [skip ci]" || exit 0
           git push
-          
