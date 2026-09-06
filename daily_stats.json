@@ -443,6 +443,10 @@
         "movie actress": {
             "images": 0,
             "videos": 1
+        },
+        "serial actress": {
+            "images": 1,
+            "videos": 0
         }
     }
 }
