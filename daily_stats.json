@@ -463,6 +463,10 @@
         "young ants all": {
             "images": 1,
             "videos": 0
+        },
+        "young out": {
+            "images": 1,
+            "videos": 0
         }
     }
 }
