@@ -455,6 +455,10 @@
         "tooo yng": {
             "images": 1,
             "videos": 0
+        },
+        "video hot": {
+            "images": 0,
+            "videos": 1
         }
     }
 }
