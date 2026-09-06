@@ -425,6 +425,10 @@
         "Fake actress": {
             "images": 1,
             "videos": 0
+        },
+        "kisses": {
+            "images": 0,
+            "videos": 1
         }
     }
 }
