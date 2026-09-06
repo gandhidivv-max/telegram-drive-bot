@@ -421,6 +421,10 @@
         "aa hot face video": {
             "images": 0,
             "videos": 1
+        },
+        "Fake actress": {
+            "images": 1,
+            "videos": 0
         }
     }
 }
