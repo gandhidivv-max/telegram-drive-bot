@@ -389,6 +389,10 @@
         "video kiss": {
             "images": 0,
             "videos": 1
+        },
+        "video other": {
+            "images": 0,
+            "videos": 1
         }
     }
 }
