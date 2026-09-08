@@ -521,6 +521,10 @@
         "Hot face": {
             "images": 1,
             "videos": 0
+        },
+        "images expressions": {
+            "images": 1,
+            "videos": 0
         }
     }
 }
