@@ -611,6 +611,10 @@
         "video hot": {
             "images": 0,
             "videos": 1
+        },
+        "aa hot face video": {
+            "images": 0,
+            "videos": 1
         }
     }
 }
