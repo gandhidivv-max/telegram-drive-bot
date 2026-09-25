@@ -699,6 +699,10 @@
         "all": {
             "images": 1,
             "videos": 0
+        },
+        "Hot face": {
+            "images": 1,
+            "videos": 0
         }
     }
 }
